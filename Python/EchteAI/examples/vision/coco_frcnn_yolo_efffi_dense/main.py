@@ -166,7 +166,7 @@ def process(mode):
             base, "distribution_diffs", mode, f"img{i}_distribution_per_layer_stats.png"
         )))
 
-        grid = build_grid(imgs)
+        grid = build_grid_from_pairs(imgs)
 
         out_path = os.path.join(out_dir, f"img{i}.png")
         vutils.save_image(grid, out_path)
