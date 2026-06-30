@@ -1,4 +1,6 @@
+import json
 import time
+from pathlib import Path
 
 import torch
 
@@ -30,8 +32,68 @@ def train_one_epoch(
             iteration_scheduler.step()
         total_loss += float(loss.detach())
         if print_frequency and step % print_frequency == 0:
-            print(f"step={step}/{len(loader)} loss={total_loss / step:.4f}")
+            elapsed = time.perf_counter() - started
+            learning_rate = optimizer.param_groups[0]["lr"]
+            print(
+                f"step={step}/{len(loader)} loss={total_loss / step:.4f} "
+                f"lr={learning_rate:.3e} elapsed={elapsed:.1f}s",
+                flush=True,
+            )
     return {"loss": total_loss / max(len(loader), 1), "seconds": time.perf_counter() - started}
+
+
+@torch.inference_mode()
+def benchmark_inference(model, loader, device, max_images=100):
+    """Run one inference pass over at most max_images and report throughput."""
+    was_training = model.training
+    model.eval()
+    processed = 0
+    print(f"epoch benchmark started: target={max_images} images device={device}", flush=True)
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    started = time.perf_counter()
+    for images, _ in loader:
+        remaining = max_images - processed
+        if remaining <= 0:
+            break
+        images = [image.to(device) for image in images[:remaining]]
+        model(images)
+        processed += len(images)
+        if processed % 25 < len(images) or processed >= max_images:
+            print(f"epoch benchmark progress: {processed}/{max_images} images", flush=True)
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    seconds = time.perf_counter() - started
+    if was_training:
+        model.train()
+    if processed == 0:
+        raise ValueError("cannot benchmark an empty data loader")
+    return {
+        "images": processed,
+        "seconds": seconds,
+        "latency_ms_per_image": 1000.0 * seconds / processed,
+        "fps": processed / seconds,
+        "device": str(device),
+    }
+
+
+def append_epoch_benchmark(path, record):
+    """Persist benchmark history, replacing duplicate stage/epoch entries."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    history = []
+    if path.exists():
+        history = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(history, list):
+            raise ValueError(f"epoch benchmark history must be a list: {path}")
+    history = [item for item in history if not (
+        item.get("stage") == record.get("stage")
+        and item.get("epoch") == record.get("epoch")
+    )]
+    history.append(record)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(history, indent=2), encoding="utf-8")
+    temporary.replace(path)
 
 
 def make_optimizer(model, config, qat=False):

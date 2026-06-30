@@ -58,8 +58,9 @@ Vietnamese code review.
 
 ## Google Colab / SeaDronesSee v2
 
-Use [`colab/SeaDronesSee_ConvNeXt_QAT.ipynb`](colab/SeaDronesSee_ConvNeXt_QAT.ipynb)
-for the complete resumable Colab workflow. It downloads only the compressed
+Use [`colab/SeaDronesSee_OneClick.ipynb`](colab/SeaDronesSee_OneClick.ipynb)
+for the parameter-only Colab workflow; the notebook delegates all work to
+`scripts/colab_pipeline.py`. It downloads only the compressed
 dataset to Colab local SSD and stores every durable checkpoint/result in Google
 Drive. The matching configuration is
 [`configs/seadronessee_colab.yaml`](configs/seadronessee_colab.yaml).

@@ -10,7 +10,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Python"))
 from EchteAI.pipelines.convnext_qat.checkpoint import load_checkpoint, save_checkpoint
 from EchteAI.pipelines.convnext_qat.config import choose_device, load_config, quantized_modules_for_variant
 from EchteAI.pipelines.convnext_qat.data import build_coco_loader
-from EchteAI.pipelines.convnext_qat.engine import make_optimizer, set_optimizer_lr, train_one_epoch
+from EchteAI.pipelines.convnext_qat.engine import (
+    append_epoch_benchmark, benchmark_inference, make_optimizer, set_optimizer_lr,
+    train_one_epoch,
+)
 from EchteAI.pipelines.convnext_qat.metrics import evaluate_model
 from EchteAI.pipelines.convnext_qat.models import build_fasterrcnn_convnext
 from EchteAI.pipelines.convnext_qat.quantization import convert_selective_qat, prepare_selective_qat, set_qat_phase
@@ -34,6 +37,8 @@ def observer_warmup(model, loader, device, image_count):
     for images, _ in loader:
         model([image.to(device) for image in images])
         observed += len(images)
+        if observed % 50 < len(images):
+            print(f"observer calibration {observed}/{image_count} images", flush=True)
         if observed >= image_count:
             break
     model.train()
@@ -49,6 +54,12 @@ def main():
     train_loader = build_coco_loader(config, "train", limit=args.limit)
     val_loader = build_coco_loader(config, "val", shuffle=False, limit=args.limit)
     quantized_modules = quantized_modules_for_variant(config, variant)
+    print(
+        f"QAT setup device={device} variant={variant} "
+        f"train_images={len(train_loader.dataset)} val_images={len(val_loader.dataset)}",
+        flush=True,
+    )
+    print(f"quantized_modules={quantized_modules}", flush=True)
 
     fp32_model = build_fasterrcnn_convnext(config)
     load_checkpoint(args.fp32_checkpoint or config["output"]["fp32_best"], fp32_model)
@@ -88,12 +99,32 @@ def main():
             phase = "full"
         set_qat_phase(qat_model, phase)
         set_optimizer_lr(optimizer, phase_lrs.get(phase, config["training"]["qat_lr"]))
+        print(
+            f"QAT epoch={epoch + 1}/{total_epochs} phase={phase} "
+            f"lr={optimizer.param_groups[0]['lr']:.3e}",
+            flush=True,
+        )
         train_metrics = train_one_epoch(
             qat_model, train_loader, optimizer, device,
             float(config["training"].get("grad_clip_norm", 0)),
             int(config["training"].get("print_frequency", 20)),
         )
+        print("QAT validation started", flush=True)
         val_metrics = evaluate_model(qat_model, val_loader, device, include_rpn=False)
+        print("QAT validation completed", flush=True)
+        benchmark_metrics = benchmark_inference(
+            qat_model, val_loader, device,
+            int(config["training"].get("epoch_benchmark_images", 100)),
+        )
+        benchmark_record = {
+            "stage": "qat", "epoch": epoch + 1, "phase": phase, **benchmark_metrics,
+        }
+        benchmark_history = config["output"].get(
+            "epoch_benchmarks",
+            str(Path(config["output"]["directory"]) / "epoch_benchmarks.json"),
+        )
+        append_epoch_benchmark(benchmark_history, benchmark_record)
+        print(f"QAT epoch benchmark={benchmark_record}", flush=True)
         print(
             f"qat_epoch={epoch + 1}/{total_epochs} phase={phase} "
             f"train={train_metrics} validation={val_metrics}"
@@ -105,13 +136,16 @@ def main():
             best_saved = True
             save_checkpoint(
                 config["output"]["qat_best"], qat_model, optimizer, epoch + 1,
-                val_metrics,
+                {**val_metrics, "benchmark": benchmark_metrics},
                 {"variant": variant, "backend": backend, "format": "prepared_qat", "quantized_modules": quantized_modules or [], "best_map": best_map},
             )
+            print(f"saved new QAT best: {config['output']['qat_best']}", flush=True)
         save_checkpoint(
-            config["output"]["qat_last"], qat_model, optimizer, epoch + 1, val_metrics,
+            config["output"]["qat_last"], qat_model, optimizer, epoch + 1,
+            {**val_metrics, "benchmark": benchmark_metrics},
             {"variant": variant, "backend": backend, "format": "prepared_qat", "quantized_modules": quantized_modules or [], "best_map": best_map},
         )
+        print(f"saved QAT resume checkpoint: {config['output']['qat_last']}", flush=True)
     if not best_saved:
         raise ValueError("QAT schedule has no frozen-observer epoch eligible for best checkpoint selection")
     load_checkpoint(config["output"]["qat_best"], qat_model)

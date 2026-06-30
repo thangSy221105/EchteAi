@@ -11,7 +11,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Python"))
 from EchteAI.pipelines.convnext_qat.checkpoint import load_checkpoint, save_checkpoint
 from EchteAI.pipelines.convnext_qat.config import choose_device, load_config
 from EchteAI.pipelines.convnext_qat.data import build_coco_loader
-from EchteAI.pipelines.convnext_qat.engine import make_optimizer, train_one_epoch
+from EchteAI.pipelines.convnext_qat.engine import (
+    append_epoch_benchmark, benchmark_inference, make_optimizer, train_one_epoch,
+)
 from EchteAI.pipelines.convnext_qat.metrics import evaluate_model
 from EchteAI.pipelines.convnext_qat.models import build_fasterrcnn_convnext
 
@@ -32,7 +34,18 @@ def main():
     device = choose_device(config.get("device", "auto"))
     train_loader = build_coco_loader(config, "train", limit=args.limit)
     val_loader = build_coco_loader(config, "val", shuffle=False, limit=args.limit)
+    print(
+        f"FP32 setup device={device} train_images={len(train_loader.dataset)} "
+        f"val_images={len(val_loader.dataset)} epochs={config['training']['fp32_epochs']}",
+        flush=True,
+    )
+    print(f"FP32 best={config['output']['fp32_best']}", flush=True)
+    print(f"FP32 last={config['output']['fp32_last']}", flush=True)
     model = build_fasterrcnn_convnext(config).to(device)
+    print(
+        f"model={config['model']['backbone']} parameters={model.logical_parameter_count:,}",
+        flush=True,
+    )
     optimizer = make_optimizer(model, config)
     scheduler = torch.optim.lr_scheduler.StepLR(
         optimizer,
@@ -49,6 +62,11 @@ def main():
         best_map = float(payload.get("extra", {}).get("best_map", -1.0))
         print(f"resumed FP32 checkpoint={args.resume} epoch={start_epoch}")
     for epoch in range(start_epoch, int(config["training"]["fp32_epochs"])):
+        print(
+            f"FP32 epoch={epoch + 1}/{config['training']['fp32_epochs']} "
+            f"lr={optimizer.param_groups[0]['lr']:.3e}",
+            flush=True,
+        )
         warmup_scheduler = None
         if epoch == 0:
             warmup_iterations = min(
@@ -65,21 +83,38 @@ def main():
             int(config["training"].get("print_frequency", 20)),
             warmup_scheduler,
         )
+        print("FP32 validation started", flush=True)
         val_metrics = evaluate_model(model, val_loader, device)
+        print("FP32 validation completed", flush=True)
+        benchmark_metrics = benchmark_inference(
+            model, val_loader, device,
+            int(config["training"].get("epoch_benchmark_images", 100)),
+        )
+        benchmark_record = {"stage": "fp32", "epoch": epoch + 1, **benchmark_metrics}
+        benchmark_history = config["output"].get(
+            "epoch_benchmarks",
+            str(Path(config["output"]["directory"]) / "epoch_benchmarks.json"),
+        )
+        append_epoch_benchmark(benchmark_history, benchmark_record)
+        print(f"FP32 epoch benchmark={benchmark_record}", flush=True)
         scheduler.step()
         print(f"epoch={epoch + 1} train={train_metrics} validation={val_metrics}")
         if val_metrics["map_50_95"] > best_map:
             best_map = val_metrics["map_50_95"]
             save_checkpoint(
-                config["output"]["fp32_best"], model, optimizer, epoch + 1, val_metrics,
+                config["output"]["fp32_best"], model, optimizer, epoch + 1,
+                {**val_metrics, "benchmark": benchmark_metrics},
                 {"backbone": config["model"]["backbone"], "format": "fp32", "best_map": best_map},
                 scheduler,
             )
+            print(f"saved new FP32 best: {config['output']['fp32_best']}", flush=True)
         save_checkpoint(
-            config["output"]["fp32_last"], model, optimizer, epoch + 1, val_metrics,
+            config["output"]["fp32_last"], model, optimizer, epoch + 1,
+            {**val_metrics, "benchmark": benchmark_metrics},
             {"backbone": config["model"]["backbone"], "format": "fp32", "best_map": best_map},
             scheduler,
         )
+        print(f"saved FP32 resume checkpoint: {config['output']['fp32_last']}", flush=True)
     print(f"Best FP32 checkpoint: {config['output']['fp32_best']} (mAP={best_map:.4f})")
 
 

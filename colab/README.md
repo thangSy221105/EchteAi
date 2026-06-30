@@ -1,7 +1,10 @@
 # SeaDronesSee training on Google Colab
 
-Open `SeaDronesSee_ConvNeXt_QAT.ipynb` in Colab and select a GPU runtime. The
-notebook performs the complete workflow:
+For normal use, open `SeaDronesSee_OneClick.ipynb`: all orchestration lives in
+`scripts/colab_pipeline.py`, while the notebook only exposes common parameters.
+`SeaDronesSee_ConvNeXt_QAT.ipynb` remains as a verbose step-by-step version.
+
+The one-click pipeline performs the complete workflow:
 
 The notebook clones `https://github.com/NguyenDucThang-tb/EchteAI.git`; create
 that repository and push this workspace before opening Colab.
@@ -22,6 +25,9 @@ All durable artifacts are written to:
 ```text
 /content/drive/MyDrive/EchteAI/seadronessee_m3/
 ```
+
+The notebook streams child-process output live with unbuffered Python and also
+appends it to `fp32_train.log` and `qat_train.log` in the same Drive directory.
 
 The official 3,750-image test split has no public bounding-box annotations, so
 the Colab config points local test metrics/benchmark to validation. Test images

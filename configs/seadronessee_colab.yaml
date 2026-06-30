@@ -37,7 +37,7 @@ model:
   rpn_post_nms_top_n_test: 1000
 
 training:
-  batch_size: 1
+  batch_size: 2
   fp32_epochs: 30
   qat_epochs: 11
   optimizer: adamw
@@ -49,6 +49,7 @@ training:
   grad_clip_norm: 10.0
   warmup_iterations: 1000
   print_frequency: 50
+  epoch_benchmark_images: 100
 
 quantization:
   variant: M3
@@ -90,6 +91,7 @@ output:
   int8_model: /content/drive/MyDrive/EchteAI/seadronessee_m3/selective_int8.pt
   evaluation_json: /content/drive/MyDrive/EchteAI/seadronessee_m3/evaluation.json
   benchmark_json: /content/drive/MyDrive/EchteAI/seadronessee_m3/benchmark.json
+  epoch_benchmarks: /content/drive/MyDrive/EchteAI/seadronessee_m3/epoch_benchmarks.json
 
 benchmark:
   warmup_iterations: 10
