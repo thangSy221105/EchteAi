@@ -112,6 +112,15 @@ def _coco_metrics(predictions, targets, dataset):
     if not results:
         return None
     coco_gt = COCO(str(dataset.annotation_path))
+    # Some SeaDronesSee COCO exports omit optional fields expected by
+    # pycocotools. Normal images are not crowd regions; derive area from bbox
+    # when it is absent instead of requiring a rewritten annotation file.
+    for annotation in coco_gt.dataset.get("annotations", []):
+        annotation.setdefault("iscrowd", 0)
+        if "area" not in annotation:
+            _, _, width, height = annotation["bbox"]
+            annotation["area"] = max(float(width), 0.0) * max(float(height), 0.0)
+    coco_gt.createIndex()
     evaluator = COCOeval(coco_gt, coco_gt.loadRes(results), "bbox")
     evaluator.params.imgIds = [int(target["image_id"]) for target in targets]
     evaluator.evaluate()

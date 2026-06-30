@@ -109,6 +109,14 @@ def main():
             float(config["training"].get("grad_clip_norm", 0)),
             int(config["training"].get("print_frequency", 20)),
         )
+        # QAT has no epoch scheduler, so this prepared-model checkpoint can be
+        # resumed directly even when validation or benchmarking later fails.
+        save_checkpoint(
+            config["output"]["qat_last"], qat_model, optimizer, epoch + 1,
+            {"train": train_metrics, "validation_pending": True},
+            {"variant": variant, "backend": backend, "format": "prepared_qat", "quantized_modules": quantized_modules or [], "best_map": best_map},
+        )
+        print(f"saved pre-validation QAT checkpoint: {config['output']['qat_last']}", flush=True)
         print("QAT validation started", flush=True)
         val_metrics = evaluate_model(qat_model, val_loader, device, include_rpn=False)
         print("QAT validation completed", flush=True)

@@ -83,6 +83,16 @@ def main():
             int(config["training"].get("print_frequency", 20)),
             warmup_scheduler,
         )
+        # Persist the completed training epoch before validation so a metric
+        # or Drive interruption cannot force the whole epoch to be repeated.
+        scheduler.step()
+        save_checkpoint(
+            config["output"]["fp32_last"], model, optimizer, epoch + 1,
+            {"train": train_metrics, "validation_pending": True},
+            {"backbone": config["model"]["backbone"], "format": "fp32", "best_map": best_map},
+            scheduler,
+        )
+        print(f"saved pre-validation FP32 checkpoint: {config['output']['fp32_last']}", flush=True)
         print("FP32 validation started", flush=True)
         val_metrics = evaluate_model(model, val_loader, device)
         print("FP32 validation completed", flush=True)
@@ -97,7 +107,6 @@ def main():
         )
         append_epoch_benchmark(benchmark_history, benchmark_record)
         print(f"FP32 epoch benchmark={benchmark_record}", flush=True)
-        scheduler.step()
         print(f"epoch={epoch + 1} train={train_metrics} validation={val_metrics}")
         if val_metrics["map_50_95"] > best_map:
             best_map = val_metrics["map_50_95"]
