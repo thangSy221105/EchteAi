@@ -102,7 +102,7 @@ def detection_collate(batch):
     return tuple(zip(*batch))
 
 
-def build_coco_loader(config, split, shuffle=None, limit=None):
+def build_coco_loader(config, split, shuffle=None, limit=None, batch_size=None):
     dataset_cfg = config["dataset"]
     dataset = CocoDetectionDataset(
         dataset_cfg[f"{split}_images"],
@@ -124,7 +124,7 @@ def build_coco_loader(config, split, shuffle=None, limit=None):
         shuffle = split == "train"
     return DataLoader(
         dataset,
-        batch_size=int(config["training"]["batch_size"]),
+        batch_size=int(batch_size or config["training"]["batch_size"]),
         shuffle=shuffle,
         num_workers=int(dataset_cfg.get("workers", 4)),
         collate_fn=detection_collate,

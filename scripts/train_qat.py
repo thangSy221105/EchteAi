@@ -51,8 +51,13 @@ def main():
     variant = args.variant or str(config["quantization"].get("variant", "M3")).upper()
     backend = config["quantization"].get("backend", "x86")
     device = choose_device(config.get("device", "auto"))
-    train_loader = build_coco_loader(config, "train", limit=args.limit)
-    val_loader = build_coco_loader(config, "val", shuffle=False, limit=args.limit)
+    qat_batch_size = config["training"].get("qat_batch_size", config["training"]["batch_size"])
+    train_loader = build_coco_loader(
+        config, "train", limit=args.limit, batch_size=qat_batch_size,
+    )
+    val_loader = build_coco_loader(
+        config, "val", shuffle=False, limit=args.limit, batch_size=qat_batch_size,
+    )
     quantized_modules = quantized_modules_for_variant(config, variant)
     print(
         f"QAT setup device={device} variant={variant} "

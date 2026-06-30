@@ -2,6 +2,7 @@
 """Train/benchmark a 200-step FP32 checkpoint, then smoke-test QAT and INT8."""
 
 import argparse
+import copy
 import gc
 import json
 import sys
@@ -32,6 +33,7 @@ def parse_args():
     parser.add_argument("--benchmark-images", type=int, default=100)
     parser.add_argument("--calibration-images", type=int, default=100)
     parser.add_argument("--variant", choices=["M0", "M1", "M2", "M3", "M4"])
+    parser.add_argument("--qat-batch-size", type=int, default=1)
     return parser.parse_args()
 
 
@@ -54,7 +56,7 @@ def calibrate(model, loader, device, image_count):
 
 def main():
     args = parse_args()
-    if min(args.steps, args.benchmark_images, args.calibration_images) <= 0:
+    if min(args.steps, args.benchmark_images, args.calibration_images, args.qat_batch_size) <= 0:
         raise ValueError("steps and image counts must be positive")
 
     config = load_config(args.config, require_dataset=True)
@@ -75,24 +77,35 @@ def main():
     )
 
     fp32_model = build_fasterrcnn_convnext(config).to(device)
-    fp32_optimizer = make_optimizer(fp32_model, config)
-    fp32_train = train_one_epoch(
-        fp32_model, train_loader, fp32_optimizer, device,
-        float(config["training"].get("grad_clip_norm", 0)),
-        int(config["training"].get("print_frequency", 50)),
-        max_steps=args.steps,
-    )
-    fp32_benchmark = benchmark_inference(
-        fp32_model, val_loader, device, args.benchmark_images,
-    )
-    save_checkpoint(
-        fp32_path, fp32_model, fp32_optimizer, metrics={
-            "train": fp32_train, "benchmark": fp32_benchmark,
-        }, extra={"format": "fp32", "steps": args.steps},
-    )
-    print(f"saved {args.steps}-step FP32 checkpoint: {fp32_path}", flush=True)
+    if fp32_path.exists():
+        payload = load_checkpoint(fp32_path, fp32_model, map_location=device)
+        fp32_train = payload.get("metrics", {}).get("train", {})
+        fp32_benchmark = payload.get("metrics", {}).get("benchmark")
+        if not fp32_benchmark:
+            fp32_benchmark = benchmark_inference(
+                fp32_model, val_loader, device, args.benchmark_images,
+            )
+        print(f"reusing FP32 checkpoint: {fp32_path}", flush=True)
+    else:
+        fp32_optimizer = make_optimizer(fp32_model, config)
+        fp32_train = train_one_epoch(
+            fp32_model, train_loader, fp32_optimizer, device,
+            float(config["training"].get("grad_clip_norm", 0)),
+            int(config["training"].get("print_frequency", 50)),
+            max_steps=args.steps,
+        )
+        fp32_benchmark = benchmark_inference(
+            fp32_model, val_loader, device, args.benchmark_images,
+        )
+        save_checkpoint(
+            fp32_path, fp32_model, fp32_optimizer, metrics={
+                "train": fp32_train, "benchmark": fp32_benchmark,
+            }, extra={"format": "fp32", "steps": args.steps},
+        )
+        print(f"saved {args.steps}-step FP32 checkpoint: {fp32_path}", flush=True)
+        del fp32_optimizer
 
-    del fp32_model, fp32_optimizer
+    del fp32_model
     gc.collect()
     if device.type == "cuda":
         torch.cuda.empty_cache()
@@ -106,18 +119,25 @@ def main():
         base_model, variant, backend, quantized_modules=quantized_modules,
     ).to(device)
     del base_model
-    observed = calibrate(qat_model, train_loader, device, args.calibration_images)
+    qat_config = copy.deepcopy(config)
+    qat_config["training"]["batch_size"] = args.qat_batch_size
+    qat_train_loader = build_coco_loader(qat_config, "train")
+    qat_val_loader = build_coco_loader(qat_config, "val", shuffle=False)
+    print(f"QAT batch_size={args.qat_batch_size} (FP32 remains {config['training']['batch_size']})", flush=True)
+    observed = calibrate(qat_model, qat_train_loader, device, args.calibration_images)
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
     set_qat_phase(qat_model, "full")
     qat_optimizer = make_optimizer(qat_model, config, qat=True)
     qat_train = train_one_epoch(
-        qat_model, train_loader, qat_optimizer, device,
+        qat_model, qat_train_loader, qat_optimizer, device,
         float(config["training"].get("grad_clip_norm", 0)),
         int(config["training"].get("print_frequency", 50)),
         max_steps=args.steps,
     )
     set_qat_phase(qat_model, "frozen")
     qat_benchmark = benchmark_inference(
-        qat_model, val_loader, device, args.benchmark_images,
+        qat_model, qat_val_loader, device, args.benchmark_images,
     )
     save_checkpoint(
         qat_path, qat_model, qat_optimizer, metrics={
@@ -138,7 +158,7 @@ def main():
         },
     )
     int8_benchmark = benchmark_inference(
-        int8_model, val_loader, torch.device("cpu"), args.benchmark_images,
+        int8_model, qat_val_loader, torch.device("cpu"), args.benchmark_images,
     )
     results = {
         "steps": args.steps,

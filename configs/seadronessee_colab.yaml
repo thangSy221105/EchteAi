@@ -38,6 +38,8 @@ model:
 
 training:
   batch_size: 2
+  fp32_batch_size: 2
+  qat_batch_size: 1
   fp32_epochs: 30
   qat_epochs: 11
   optimizer: adamw

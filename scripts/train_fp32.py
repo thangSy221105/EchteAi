@@ -32,7 +32,10 @@ def main():
     random.seed(config.get("seed", 42))
     torch.manual_seed(config.get("seed", 42))
     device = choose_device(config.get("device", "auto"))
-    train_loader = build_coco_loader(config, "train", limit=args.limit)
+    train_loader = build_coco_loader(
+        config, "train", limit=args.limit,
+        batch_size=config["training"].get("fp32_batch_size", config["training"]["batch_size"]),
+    )
     val_loader = build_coco_loader(config, "val", shuffle=False, limit=args.limit)
     print(
         f"FP32 setup device={device} train_images={len(train_loader.dataset)} "
