@@ -35,13 +35,14 @@ def parse_args():
 
 @torch.no_grad()
 def observer_warmup(model, loader, device, image_count):
+    print(f"observer calibration started target={image_count} device={device}", flush=True)
     model.eval()
     set_qat_phase(model, "calibration")
     observed = 0
     for images, _ in loader:
         model([image.to(device) for image in images])
         observed += len(images)
-        if observed % 50 < len(images):
+        if observed % 25 < len(images) or observed >= image_count:
             print(f"observer calibration {observed}/{image_count} images", flush=True)
         if observed >= image_count:
             break
@@ -70,12 +71,18 @@ def main():
     )
     print(f"quantized_modules={quantized_modules}", flush=True)
 
+    source_checkpoint = args.fp32_checkpoint or config["output"]["fp32_best"]
+    print("building FP32 model topology...", flush=True)
     fp32_model = build_fasterrcnn_convnext(config)
-    load_checkpoint(args.fp32_checkpoint or config["output"]["fp32_best"], fp32_model)
+    print(f"loading FP32 checkpoint={source_checkpoint}", flush=True)
+    load_checkpoint(source_checkpoint, fp32_model)
+    print("FP32 checkpoint loaded; preparing selective QAT model...", flush=True)
     qat_model = prepare_selective_qat(
         fp32_model, variant, backend, quantized_modules=quantized_modules
     ).to(device)
+    print("selective QAT model prepared and moved to device", flush=True)
     optimizer = make_optimizer(qat_model, config, qat=True)
+    print(f"QAT optimizer ready lr={optimizer.param_groups[0]['lr']:.3e}", flush=True)
     total_epochs = int(config["training"]["qat_epochs"])
     if args.epochs_this_run is not None and args.epochs_this_run <= 0:
         raise ValueError("--epochs-this-run must be positive")
