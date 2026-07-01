@@ -23,6 +23,10 @@ def parse_args():
     parser.add_argument("--config", default="configs/fasterrcnn_convnext_qat.yaml")
     parser.add_argument("--limit", type=int, help="limit each split for a quick experiment")
     parser.add_argument("--resume", help="resume an FP32 training checkpoint")
+    parser.add_argument(
+        "--epochs-this-run", type=int,
+        help="stop after this many epochs; useful for short Colab sessions",
+    )
     return parser.parse_args()
 
 
@@ -64,7 +68,13 @@ def main():
         start_epoch = int(payload.get("epoch", 0))
         best_map = float(payload.get("extra", {}).get("best_map", -1.0))
         print(f"resumed FP32 checkpoint={args.resume} epoch={start_epoch}")
-    for epoch in range(start_epoch, int(config["training"]["fp32_epochs"])):
+    total_epochs = int(config["training"]["fp32_epochs"])
+    if args.epochs_this_run is not None and args.epochs_this_run <= 0:
+        raise ValueError("--epochs-this-run must be positive")
+    end_epoch = total_epochs
+    if args.epochs_this_run is not None:
+        end_epoch = min(start_epoch + args.epochs_this_run, total_epochs)
+    for epoch in range(start_epoch, end_epoch):
         print(
             f"FP32 epoch={epoch + 1}/{config['training']['fp32_epochs']} "
             f"lr={optimizer.param_groups[0]['lr']:.3e}",
@@ -127,7 +137,13 @@ def main():
             scheduler,
         )
         print(f"saved FP32 resume checkpoint: {config['output']['fp32_last']}", flush=True)
-    print(f"Best FP32 checkpoint: {config['output']['fp32_best']} (mAP={best_map:.4f})")
+    print(
+        f"FP32 run completed at epoch {end_epoch}/{total_epochs}. "
+        f"Resume checkpoint: {config['output']['fp32_last']}",
+        flush=True,
+    )
+    if end_epoch == total_epochs:
+        print(f"Best FP32 checkpoint: {config['output']['fp32_best']} (mAP={best_map:.4f})")
 
 
 if __name__ == "__main__":

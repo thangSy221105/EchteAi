@@ -26,6 +26,10 @@ def parse_args():
     parser.add_argument("--variant", choices=["M0", "M1", "M2", "M3", "M4"])
     parser.add_argument("--limit", type=int)
     parser.add_argument("--resume", help="resume a prepared-QAT checkpoint")
+    parser.add_argument(
+        "--epochs-this-run", type=int,
+        help="stop after this many epochs; useful for short Colab sessions",
+    )
     return parser.parse_args()
 
 
@@ -73,6 +77,8 @@ def main():
     ).to(device)
     optimizer = make_optimizer(qat_model, config, qat=True)
     total_epochs = int(config["training"]["qat_epochs"])
+    if args.epochs_this_run is not None and args.epochs_this_run <= 0:
+        raise ValueError("--epochs-this-run must be positive")
     weight_only_epochs = int(config["quantization"].get("weight_only_warmup_epochs", 1))
     freeze_epochs = int(config["quantization"].get("observer_freeze_epochs", 2))
     if weight_only_epochs + freeze_epochs > total_epochs:
@@ -95,7 +101,10 @@ def main():
         if observed_images < int(config["quantization"].get("calibration_images", 256)):
             print("warning: calibration dataset ended before the requested image count")
     phase_lrs = config["quantization"].get("phase_learning_rates", {})
-    for epoch in range(start_epoch, total_epochs):
+    end_epoch = total_epochs
+    if args.epochs_this_run is not None:
+        end_epoch = min(start_epoch + args.epochs_this_run, total_epochs)
+    for epoch in range(start_epoch, end_epoch):
         if epoch < weight_only_epochs:
             phase = "weight_only"
         elif epoch >= total_epochs - freeze_epochs:
@@ -159,6 +168,13 @@ def main():
             {"variant": variant, "backend": backend, "format": "prepared_qat", "quantized_modules": quantized_modules or [], "best_map": best_map},
         )
         print(f"saved QAT resume checkpoint: {config['output']['qat_last']}", flush=True)
+    print(
+        f"QAT run completed at epoch {end_epoch}/{total_epochs}. "
+        f"Resume checkpoint: {config['output']['qat_last']}",
+        flush=True,
+    )
+    if end_epoch < total_epochs:
+        return
     if not best_saved:
         raise ValueError("QAT schedule has no frozen-observer epoch eligible for best checkpoint selection")
     load_checkpoint(config["output"]["qat_best"], qat_model)
