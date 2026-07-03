@@ -13,6 +13,7 @@ import argparse
 import os
 import sys
 import time
+from datetime import timedelta
 from pathlib import Path
 
 import torch
@@ -70,7 +71,13 @@ def setup_distributed():
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for DDP QAT training")
     torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend="nccl", init_method="env://")
+    # Rank 0 performs full validation while the other ranks wait at a barrier.
+    # SeaDronesSee validation can exceed NCCL's 10-minute default timeout.
+    dist.init_process_group(
+        backend="nccl",
+        init_method="env://",
+        timeout=timedelta(hours=3),
+    )
     return local_rank, rank, world_size, torch.device(f"cuda:{local_rank}")
 
 
