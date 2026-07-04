@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 import torch
-from PIL import ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont
 from torchvision.transforms.functional import to_pil_image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Python"))
@@ -65,7 +65,7 @@ def draw_panel(image, boxes, labels, scores, names, title, color, threshold=0.0,
 def combine_panels(panels):
     width = sum(panel.width for panel in panels)
     height = max(panel.height for panel in panels)
-    combined = panels[0].new("RGB", (width, height), "white")
+    combined = Image.new("RGB", (width, height), "white")
     x = 0
     for panel in panels:
         combined.paste(panel, (x, 0))
