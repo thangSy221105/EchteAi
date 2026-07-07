@@ -11,12 +11,13 @@ import torch
 from PIL import Image, ImageDraw, ImageFont
 from torchvision.transforms.functional import to_pil_image
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Python"))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from evaluate import load_model
-from EchteAI.pipelines.convnext_qat.config import load_config
-from EchteAI.pipelines.convnext_qat.data import build_coco_loader, unwrap_coco_dataset
+from pipelines.convnext_qat.config import load_config
+from pipelines.convnext_qat.data import build_coco_loader, unwrap_coco_dataset
 
 
 COLORS = {"gt": "#22c55e", "fp32": "#3b82f6", "int8": "#f97316"}

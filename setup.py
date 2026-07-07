@@ -1,5 +1,12 @@
-from setuptools import setup, find_packages
 import os
+from setuptools import find_packages, setup
+
+
+packages = list(
+    dict.fromkeys(
+        find_packages(include=["pipelines", "pipelines.*"])
+    )
+)
 
 setup(
     name="EchteAI",
@@ -10,8 +17,7 @@ setup(
     long_description=open(os.path.join(os.path.dirname(__file__), 'README.md')).read(),
     long_description_content_type="text/markdown",
     url="https://github.com/EgyipTomi425/EchteAI",
-    packages=find_packages(where="Python"),
-    package_dir={"": "Python"},
+    packages=packages,
     install_requires=[
         "requests",
         "tqdm",

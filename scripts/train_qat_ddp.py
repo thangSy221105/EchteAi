@@ -22,24 +22,25 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, Subset
 from torch.utils.data.distributed import DistributedSampler
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Python"))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
 
-from EchteAI.pipelines.convnext_qat.checkpoint import load_checkpoint, save_checkpoint  # noqa: E402
-from EchteAI.pipelines.convnext_qat.config import load_config, quantized_modules_for_variant  # noqa: E402
-from EchteAI.pipelines.convnext_qat.data import (  # noqa: E402
+from pipelines.convnext_qat.checkpoint import load_checkpoint, save_checkpoint  # noqa: E402
+from pipelines.convnext_qat.config import load_config, quantized_modules_for_variant  # noqa: E402
+from pipelines.convnext_qat.data import (  # noqa: E402
     CocoDetectionDataset,
     build_coco_loader,
     detection_collate,
 )
-from EchteAI.pipelines.convnext_qat.engine import (  # noqa: E402
+from pipelines.convnext_qat.engine import (  # noqa: E402
     append_epoch_benchmark,
     benchmark_inference,
     make_optimizer,
     set_optimizer_lr,
 )
-from EchteAI.pipelines.convnext_qat.metrics import evaluate_model  # noqa: E402
-from EchteAI.pipelines.convnext_qat.models import build_fasterrcnn_convnext  # noqa: E402
-from EchteAI.pipelines.convnext_qat.quantization import (  # noqa: E402
+from pipelines.convnext_qat.metrics import evaluate_model  # noqa: E402
+from pipelines.convnext_qat.models import build_fasterrcnn_convnext  # noqa: E402
+from pipelines.convnext_qat.quantization import (  # noqa: E402
     convert_selective_qat,
     prepare_selective_qat,
     set_qat_phase,

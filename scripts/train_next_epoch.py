@@ -8,9 +8,10 @@ from pathlib import Path
 
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Python"))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
 
-from EchteAI.pipelines.convnext_qat.config import load_config
+from pipelines.convnext_qat.config import load_config
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

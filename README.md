@@ -1,66 +1,74 @@
 # EchteAI
 
-## Selective-QAT Faster R-CNN with ConvNeXt-FPN
+Selective-QAT Faster R-CNN for SeaDronesSee, now flattened around a single
+root-level `pipelines/` package.
 
-This repository includes a complete COCO training pipeline for a ConvNeXt-Tiny
-(or ConvNeXt-Small) Faster R-CNN. Quantization is deliberately bounded: M3, the
-default, converts ConvNeXt Conv/Linear operations, FPN convolutions, the shared
-RPN convolution and RPN classifier to INT8. ConvNeXt LayerNorm/GELU/residual
-math, transforms, anchors, RPN regression/decode/NMS, ROI Align, ROI heads and
-final postprocessing remain FP32.
+## What this repo does
 
-Each selected operation is surrounded by a QuantStub/DeQuantStub pair. During
-QAT this simulates activation and per-channel symmetric weight quantization;
-after conversion it executes a real quantized CPU kernel and returns FP32 at the
-boundary. This avoids sending quantized tensors into unsupported detection and
-normalization operators.
+The current pipeline trains a ConvNeXt-FPN Faster R-CNN in two stages:
 
-Requirements are Python 3.10+, PyTorch, torchvision, Pillow and PyYAML.
-`pycocotools` is optional: when present, evaluation reports canonical COCO AP;
-otherwise the included 101-point metric implementation is used.
+1. FP32 training to get a strong baseline checkpoint.
+2. Selective QAT for the quantized backbone / FPN / RPN parts, then INT8
+   conversion for CPU deployment.
 
-Configure COCO paths, class count (including background), anchors and training
-settings in `configs/fasterrcnn_convnext_qat.yaml`. COCO category IDs are
-remapped to contiguous labels for training and mapped back for evaluation.
+The project also includes evaluation, benchmark, visualization, and Kaggle /
+Colab notebook flows for running the same pipeline on limited hardware.
+
+## Main folders
+
+- `configs/` – YAML configs for local, Colab, and Kaggle runs.
+- `pipelines/` – core model, data, training, checkpoint, metric, and QAT code.
+- `scripts/` – CLI entry points for train, eval, benchmark, video inference,
+  comparison, and visualization.
+- `colab/` – one-click notebook for Colab-style runs.
+- `kaggle/` – Kaggle notebooks for staged training, benchmarking, and
+  visualization.
+- `weights/` – saved checkpoints and exported quantized weights.
+- `tests/` – smoke tests for the selective-QAT pipeline.
+
+The old `Python/` tree has been removed.
+
+## Typical workflow
 
 ```bash
 cd /home/nguyenducthang/EchteAI
 
-# FP32 baseline; best checkpoint is selected by validation mAP.
+# 1) Train FP32
 python scripts/train_fp32.py --config configs/fasterrcnn_convnext_qat.yaml
 
-# Observer calibration, staged QAT, observer freeze, and INT8 conversion.
+# 2) Continue with QAT
 python scripts/train_qat.py --config configs/fasterrcnn_convnext_qat.yaml
 
-# Ablations: M0 FP32, M1 backbone, M2 +FPN, M3 +RPN conv/cls, M4 full RPN.
-python scripts/train_qat.py --config configs/fasterrcnn_convnext_qat.yaml --variant M2
-
-# Evaluate both checkpoints on the same split.
+# 3) Evaluate or benchmark
 python scripts/evaluate.py --model fp32 --split test
 python scripts/evaluate.py --model int8 --split test
-
-# CPU latency, FPS, model size, and speedup JSON.
 python scripts/benchmark.py --config configs/fasterrcnn_convnext_qat.yaml
+
+# 4) Visualize FP32 vs INT8 outputs
+python scripts/visualize_fp32_int8.py --config configs/fasterrcnn_convnext_qat.yaml
 ```
 
-Use `--limit N` for quick subset experiments. Converted INT8 checkpoints are
-CPU-only. If pretrained weights are not cached and the machine is offline, set
-`model.pretrained_backbone` to `false`.
+## ConvNeXt selective QAT
 
-Evaluation reports mAP@0.5, mAP@0.5:0.95, size AP, precision, recall, and RPN
-Recall@100/@300/@1000, F1, and proposal statistics. The benchmark reports fair
-model-only size, parameter count, latency p50/p95, FPS, and peak RSS after
-configurable warmup/timed iterations.
+The ConvNeXt pipeline lives under `pipelines/convnext_qat/`. It contains:
 
-See [`docs/PIPELINE_REVIEW_VI.md`](docs/PIPELINE_REVIEW_VI.md) for the directory
-map, execution flow, quantization boundaries, checkpoint format, and a detailed
-Vietnamese code review.
+- backbone construction
+- Faster R-CNN assembly
+- selective quantization wrappers
+- checkpoint save / resume helpers
+- training / validation engine
+- metric computation for detection and benchmark reporting
 
-## Google Colab / SeaDronesSee v2
+By default the model keeps detection post-processing, image transforms, anchors,
+ROIAlign, and regression in FP32, while quantizing the selected backbone/FPN/RPN
+parts only.
 
-Use [`colab/SeaDronesSee_OneClick.ipynb`](colab/SeaDronesSee_OneClick.ipynb)
-for the parameter-only Colab workflow; the notebook delegates all work to
-`scripts/colab_pipeline.py`. It downloads only the compressed
-dataset to Colab local SSD and stores every durable checkpoint/result in Google
-Drive. The matching configuration is
-[`configs/seadronessee_colab.yaml`](configs/seadronessee_colab.yaml).
+## Notes
+
+- INT8 checkpoints are CPU-oriented.
+- If you run on Colab or Kaggle, prefer the notebook entry points under
+  `colab/` and `kaggle/` because they keep durable outputs in Drive / dataset
+  storage.
+- `pycocotools` is optional; if it is missing, the repository falls back to the
+  bundled detection metrics.
+

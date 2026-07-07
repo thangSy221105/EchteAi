@@ -5,18 +5,19 @@ from pathlib import Path
 
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Python"))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
 
-from EchteAI.pipelines.convnext_qat.checkpoint import load_checkpoint, save_checkpoint
-from EchteAI.pipelines.convnext_qat.config import choose_device, load_config, quantized_modules_for_variant
-from EchteAI.pipelines.convnext_qat.data import build_coco_loader
-from EchteAI.pipelines.convnext_qat.engine import (
+from pipelines.convnext_qat.checkpoint import load_checkpoint, save_checkpoint
+from pipelines.convnext_qat.config import choose_device, load_config, quantized_modules_for_variant
+from pipelines.convnext_qat.data import build_coco_loader
+from pipelines.convnext_qat.engine import (
     append_epoch_benchmark, benchmark_inference, make_optimizer, set_optimizer_lr,
     train_one_epoch,
 )
-from EchteAI.pipelines.convnext_qat.metrics import evaluate_model
-from EchteAI.pipelines.convnext_qat.models import build_fasterrcnn_convnext
-from EchteAI.pipelines.convnext_qat.quantization import convert_selective_qat, prepare_selective_qat, set_qat_phase
+from pipelines.convnext_qat.metrics import evaluate_model
+from pipelines.convnext_qat.models import build_fasterrcnn_convnext
+from pipelines.convnext_qat.quantization import convert_selective_qat, prepare_selective_qat, set_qat_phase
 
 
 def parse_args():

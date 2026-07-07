@@ -5,10 +5,11 @@ from pathlib import Path
 
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Python"))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
 
-from EchteAI.pipelines.convnext_qat.models import build_fasterrcnn_convnext
-from EchteAI.pipelines.convnext_qat.quantization.selective_qat import (
+from pipelines.convnext_qat.models import build_fasterrcnn_convnext
+from pipelines.convnext_qat.quantization.selective_qat import (
     convert_selective_qat,
     prepare_selective_qat,
     quantized_region_summary,

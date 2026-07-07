@@ -8,15 +8,16 @@ from pathlib import Path
 
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Python"))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from evaluate import load_model
-from EchteAI.pipelines.convnext_qat.checkpoint import model_state_size_mb
-from EchteAI.pipelines.convnext_qat.config import load_config
-from EchteAI.pipelines.convnext_qat.data import build_coco_loader
-from EchteAI.pipelines.convnext_qat.engine import benchmark_inference
-from EchteAI.pipelines.convnext_qat.metrics import evaluate_model
+from pipelines.convnext_qat.checkpoint import model_state_size_mb
+from pipelines.convnext_qat.config import load_config
+from pipelines.convnext_qat.data import build_coco_loader
+from pipelines.convnext_qat.engine import benchmark_inference
+from pipelines.convnext_qat.metrics import evaluate_model
 
 
 def parse_args():

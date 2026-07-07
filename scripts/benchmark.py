@@ -9,12 +9,13 @@ from pathlib import Path
 
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Python"))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
 
 from evaluate import load_model
-from EchteAI.pipelines.convnext_qat.checkpoint import model_state_size_mb
-from EchteAI.pipelines.convnext_qat.config import load_config, validate_dataset_paths
-from EchteAI.pipelines.convnext_qat.data import build_coco_loader
+from pipelines.convnext_qat.checkpoint import model_state_size_mb
+from pipelines.convnext_qat.config import load_config, validate_dataset_paths
+from pipelines.convnext_qat.data import build_coco_loader
 
 
 @torch.inference_mode()
