@@ -29,6 +29,7 @@ from pipelines.convnext_qat.checkpoint import load_checkpoint, save_checkpoint  
 from pipelines.convnext_qat.config import load_config, quantized_modules_for_variant  # noqa: E402
 from pipelines.convnext_qat.data import (  # noqa: E402
     CocoDetectionDataset,
+    TiledCocoDetectionDataset,
     build_coco_loader,
     detection_collate,
 )
@@ -107,6 +108,20 @@ def build_distributed_loader(config, split, rank, world_size, limit=None, batch_
         raise ValueError(
             f"dataset.num_classes={dataset_cfg['num_classes']} but {split} annotations "
             f"contain {len(dataset.category_id_to_label)} foreground categories"
+        )
+    tiling = config.get("augmentation", {}).get("tiling", {})
+    if split == "train" and tiling.get("enabled", False):
+        dataset = TiledCocoDetectionDataset(
+            dataset,
+            tile_size=tiling.get("tile_size", 960),
+            overlap=tiling.get("overlap", 0.25),
+            keep_empty_probability=tiling.get("keep_empty_probability", 0.1),
+            min_visible_fraction=tiling.get("min_visible_fraction", 0.5),
+        )
+        rank0_print(
+            rank,
+            f"training tiling enabled: crops={len(dataset)} size={dataset.tile_size} "
+            f"overlap={dataset.overlap:.2f}",
         )
     if limit is not None:
         dataset = Subset(dataset, range(min(int(limit), len(dataset))))
