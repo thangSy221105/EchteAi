@@ -18,6 +18,7 @@ from pipelines.convnext_qat.engine import (
 from pipelines.convnext_qat.metrics import evaluate_model
 from pipelines.convnext_qat.models import build_fasterrcnn_convnext
 from pipelines.convnext_qat.quantization import convert_selective_qat, prepare_selective_qat, set_qat_phase
+from pipelines.convnext_qat.tiling import validation_detector
 
 
 def parse_args():
@@ -81,6 +82,7 @@ def main():
     qat_model = prepare_selective_qat(
         fp32_model, variant, backend, quantized_modules=quantized_modules
     ).to(device)
+    backend = qat_model.quantized_backend
     print("selective QAT model prepared and moved to device", flush=True)
     optimizer = make_optimizer(qat_model, config, qat=True)
     print(f"QAT optimizer ready lr={optimizer.param_groups[0]['lr']:.3e}", flush=True)
@@ -140,7 +142,9 @@ def main():
         )
         print(f"saved pre-validation QAT checkpoint: {config['output']['qat_last']}", flush=True)
         print("QAT validation started", flush=True)
-        val_metrics = evaluate_model(qat_model, val_loader, device, include_rpn=False)
+        val_metrics = evaluate_model(
+            validation_detector(qat_model, config), val_loader, device, include_rpn=False,
+        )
         print("QAT validation completed", flush=True)
         benchmark_metrics = benchmark_inference(
             qat_model, val_loader, device,

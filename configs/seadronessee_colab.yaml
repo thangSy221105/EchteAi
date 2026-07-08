@@ -35,6 +35,10 @@ inference:
     nms_threshold: 0.50
     max_detections: 300
 
+validation:
+  # Use the same overlap/merge path used at deployment when selecting best checkpoints.
+  tiled: true
+
 model:
   backbone: convnext_tiny
   pretrained_backbone: true
@@ -47,6 +51,8 @@ model:
   # Deterministic 1D k-means on resized training bbox sqrt-areas.
   anchor_sizes: auto
   anchor_statistics_min_size: 960
+  # Gamma still focuses hard examples; no alpha reweighting prevents suppressing foreground.
+  focal_alpha: null
   aspect_ratios: [0.5, 1.0, 2.0]
   rpn_pre_nms_top_n_train: 2000
   rpn_pre_nms_top_n_test: 1000
@@ -73,13 +79,15 @@ training:
 
 quantization:
   variant: M3
-  backend: x86
+  backend: auto
   calibration_images: 512
   weight_only_warmup_epochs: 2
   observer_freeze_epochs: 3
   pt2e:
     # Start with backbone; change to backbone_fpn for the second ablation.
     region: backbone
+    observer_warmup_epochs: 1
+    observer_freeze_epochs: 1
     example_batch_size: 2
     maximum_batch_size: 2
     minimum_image_side: 256
@@ -125,6 +133,8 @@ output:
   pt2e_qat_best: /content/drive/MyDrive/EchteAI/seadronessee_m3/pt2e_qat_best.pt
   pt2e_qat_last: /content/drive/MyDrive/EchteAI/seadronessee_m3/pt2e_qat_last.pt
   pt2e_benchmark_json: /content/drive/MyDrive/EchteAI/seadronessee_m3/pt2e_benchmark.json
+  pt2e_int8_model: /content/drive/MyDrive/EchteAI/seadronessee_m3/pt2e_int8.pt
+  pt2e_int8_evaluation: /content/drive/MyDrive/EchteAI/seadronessee_m3/pt2e_int8_evaluation.json
 
 benchmark:
   warmup_iterations: 10

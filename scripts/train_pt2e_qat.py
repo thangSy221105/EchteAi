@@ -15,9 +15,13 @@ from pipelines.convnext_qat.checkpoint import load_checkpoint, save_checkpoint
 from pipelines.convnext_qat.config import choose_device, load_config
 from pipelines.convnext_qat.data import build_coco_loader
 from pipelines.convnext_qat.engine import benchmark_inference, make_optimizer, train_one_epoch
-from pipelines.convnext_qat.metrics import evaluate_model
+from pipelines.convnext_qat.metrics import evaluate_model, save_metrics
 from pipelines.convnext_qat.models import build_fasterrcnn_convnext
-from pipelines.convnext_qat.quantization import prepare_pt2e_backbone_qat
+from pipelines.convnext_qat.quantization import (
+    convert_pt2e_backbone, prepare_pt2e_backbone_qat, save_pt2e_int8_artifact,
+    set_pt2e_qat_phase,
+)
+from pipelines.convnext_qat.tiling import validation_detector
 
 
 def parse_args():
@@ -67,6 +71,11 @@ def main():
         best_map = float(payload.get("extra", {}).get("best_map", -1.0))
         print(f"Resumed PT2E QAT checkpoint={args.resume} epoch={start_epoch}", flush=True)
     total_epochs = int(config["training"].get("pt2e_qat_epochs", 3))
+    pt2e_config = config["quantization"].get("pt2e", {})
+    observer_warmup_epochs = int(pt2e_config.get("observer_warmup_epochs", 1))
+    observer_freeze_epochs = int(pt2e_config.get("observer_freeze_epochs", 1))
+    if observer_warmup_epochs + observer_freeze_epochs > total_epochs:
+        raise ValueError("PT2E observer warmup + freeze epochs exceed total epochs")
     if args.epochs_this_run is not None and args.epochs_this_run <= 0:
         raise ValueError("--epochs-this-run must be positive")
     end_epoch = total_epochs
@@ -79,8 +88,25 @@ def main():
     best_path = config["output"].get(
         "pt2e_qat_best", str(Path(config["output"]["directory"]) / "pt2e_qat_best.pt"),
     )
+    int8_path = config["output"].get(
+        "pt2e_int8_model", str(Path(config["output"]["directory"]) / "pt2e_int8.pt"),
+    )
+    int8_metrics_path = config["output"].get(
+        "pt2e_int8_evaluation",
+        str(Path(config["output"]["directory"]) / "pt2e_int8_evaluation.json"),
+    )
     for epoch in range(start_epoch, end_epoch):
-        print(f"PT2E QAT epoch={epoch + 1}/{total_epochs}", flush=True)
+        if epoch < observer_warmup_epochs:
+            phase = "observer_warmup"
+        elif epoch >= total_epochs - observer_freeze_epochs:
+            phase = "frozen"
+        else:
+            phase = "full"
+        fake_quantizers = set_pt2e_qat_phase(model, phase)
+        print(
+            f"PT2E QAT epoch={epoch + 1}/{total_epochs} phase={phase} "
+            f"fake_quantizers={fake_quantizers}", flush=True,
+        )
         train_metrics = train_one_epoch(
             model, train_loader, optimizer, device,
             float(config["training"].get("grad_clip_norm", 0)),
@@ -92,19 +118,42 @@ def main():
             checkpoint_extra(config, best_map),
         )
         print(f"Saved pre-validation PT2E checkpoint: {last_path}", flush=True)
-        validation = evaluate_model(model, val_loader, device, include_rpn=False)
+        validation = evaluate_model(
+            validation_detector(model, config), val_loader, device, include_rpn=False,
+        )
         timing = benchmark_inference(
             model, val_loader, device,
             int(config["training"].get("epoch_benchmark_images", 100)),
         )
         metrics = {**validation, "benchmark": timing}
-        if validation["map_50_95"] > best_map:
+        # Only frozen-range checkpoints are eligible for final conversion.
+        if phase == "frozen" and validation["map_50_95"] > best_map:
             best_map = validation["map_50_95"]
             save_checkpoint(
                 best_path, model, optimizer, epoch + 1, metrics,
                 checkpoint_extra(config, best_map),
             )
             print(f"Saved new PT2E QAT best: {best_path}", flush=True)
+            print("Converting best PT2E checkpoint and evaluating real INT8 on CPU...", flush=True)
+            int8_model = convert_pt2e_backbone(model, inplace=False, compile_region=False)
+            int8_metrics = evaluate_model(
+                validation_detector(int8_model, config), val_loader, torch.device("cpu"),
+                include_rpn=False,
+            )
+            save_pt2e_int8_artifact(
+                int8_path, int8_model, int8_metrics,
+                {
+                    "source_epoch": epoch + 1,
+                    "source_qat": str(best_path),
+                    "region": model.pt2e_quantized_region,
+                },
+            )
+            save_metrics(int8_metrics_path, int8_metrics)
+            print(
+                f"Saved PT2E INT8 artifact={int8_path} "
+                f"mAP@50:95={int8_metrics['map_50_95']:.4f}", flush=True,
+            )
+            del int8_model
         save_checkpoint(
             last_path, model, optimizer, epoch + 1, metrics,
             checkpoint_extra(config, best_map),

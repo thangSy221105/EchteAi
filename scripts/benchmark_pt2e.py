@@ -15,18 +15,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from benchmark import benchmark
 from evaluate import load_model
-from pipelines.convnext_qat.checkpoint import load_checkpoint, model_state_size_mb
+from pipelines.convnext_qat.checkpoint import model_state_size_mb
 from pipelines.convnext_qat.config import load_config, validate_dataset_paths
 from pipelines.convnext_qat.data import build_coco_loader
-from pipelines.convnext_qat.models import build_fasterrcnn_convnext
-from pipelines.convnext_qat.quantization import convert_pt2e_backbone, prepare_pt2e_backbone_qat
+from pipelines.convnext_qat.metrics import evaluate_model
+from pipelines.convnext_qat.quantization import (
+    compile_pt2e_region, load_pt2e_int8_artifact,
+)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/seadronessee_colab.yaml")
     parser.add_argument("--fp32-checkpoint", required=True)
-    parser.add_argument("--pt2e-qat-checkpoint", required=True)
+    parser.add_argument("--pt2e-int8-checkpoint", required=True)
     parser.add_argument("--eager-int8-checkpoint")
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--output")
@@ -54,13 +56,20 @@ def main():
         del eager
         gc.collect()
 
-    pt2e = build_fasterrcnn_convnext(config)
-    pt2e = prepare_pt2e_backbone_qat(pt2e, config)
-    load_checkpoint(args.pt2e_qat_checkpoint, pt2e)
-    pt2e = convert_pt2e_backbone(pt2e, inplace=True, compile_region=args.compile)
+    pt2e, artifact = load_pt2e_int8_artifact(args.pt2e_int8_checkpoint, config)
+    print("Evaluating converted PT2E INT8 artifact before latency benchmark...", flush=True)
+    pt2e_accuracy = evaluate_model(
+        pt2e, build_coco_loader(config, "test", shuffle=False, batch_size=1),
+        torch.device("cpu"), include_rpn=False,
+    )
+    pt2e_size = model_state_size_mb(pt2e)
+    if args.compile:
+        compile_pt2e_region(pt2e)
     results["pt2e_backbone"] = benchmark(pt2e, images, warmup, iterations)
-    results["pt2e_backbone"]["model_size_mb"] = model_state_size_mb(pt2e)
+    results["pt2e_backbone"]["model_size_mb"] = pt2e_size
     results["pt2e_backbone"]["compiled"] = args.compile
+    results["pt2e_backbone"]["accuracy"] = pt2e_accuracy
+    results["pt2e_backbone"]["artifact_metadata"] = artifact.get("extra", {})
     results["pt2e_speedup_vs_fp32"] = (
         results["fp32"]["latency_ms"] / results["pt2e_backbone"]["latency_ms"]
     )

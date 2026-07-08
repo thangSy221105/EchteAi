@@ -16,7 +16,7 @@ from .convnext_fpn_backbone import build_convnext_fpn_backbone
 from ..anchors import resolve_anchor_sizes
 
 
-_FOCAL_ALPHA = 0.25
+_FOCAL_ALPHA = None
 _FOCAL_GAMMA = 2.0
 
 
@@ -177,7 +177,8 @@ class FocalRoIHeads(roi_heads_module.RoIHeads):
 
 
 def _install_focal_loss(model, model_cfg):
-    focal_alpha = float(model_cfg.get("focal_alpha", 0.25))
+    configured_alpha = model_cfg.get("focal_alpha")
+    focal_alpha = None if configured_alpha is None else float(configured_alpha)
     focal_gamma = float(model_cfg.get("focal_gamma", 2.0))
 
     original_rpn = model.rpn

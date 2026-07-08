@@ -111,13 +111,20 @@ python scripts/train_next_epoch.py \
 python scripts/benchmark_pt2e.py \
   --config configs/seadronessee_colab.yaml \
   --fp32-checkpoint /path/to/fp32_best.pt \
-  --pt2e-qat-checkpoint /path/to/pt2e_qat_best.pt \
+  --pt2e-int8-checkpoint /path/to/pt2e_int8.pt \
   --compile
 ```
 
 `torch.compile` is intentionally used only for the converted backbone graph;
 the dynamic proposal, ROIAlign and NMS code remains eager FP32. PT2E checkpoints
 are separate from eager-QAT checkpoints and cannot be resumed interchangeably.
+The three default PT2E epochs run as observer-only warmup, full QAT, then frozen
+observer QAT. Each new eligible best checkpoint is converted, evaluated again as
+real CPU INT8, and stored as `pt2e_int8.pt` with its metric JSON.
+
+`backbone_fpn` uses 64-pixel ImageList padding because the FPN export introduces
+additional parity guards. Keep `region: backbone` as the production default;
+use `backbone_fpn` as a separate ablation checkpoint.
 
 ## Notes
 

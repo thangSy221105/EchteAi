@@ -46,6 +46,7 @@ from pipelines.convnext_qat.quantization import (  # noqa: E402
     prepare_selective_qat,
     set_qat_phase,
 )
+from pipelines.convnext_qat.tiling import validation_detector  # noqa: E402
 
 
 def parse_args():
@@ -271,6 +272,7 @@ def main():
         qat_model = prepare_selective_qat(
             fp32_model, variant, backend, quantized_modules=quantized_modules,
         ).to(device)
+        backend = qat_model.quantized_backend
         optimizer = make_optimizer(qat_model, config, qat=True)
         rank0_print(rank, f"QAT optimizer ready lr={optimizer.param_groups[0]['lr']:.3e}")
 
@@ -360,7 +362,10 @@ def main():
                 )
                 print(f"saved pre-validation QAT checkpoint: {config['output']['qat_last']}", flush=True)
                 print("QAT validation started on rank0", flush=True)
-                val_metrics = evaluate_model(qat_model, val_loader, device, include_rpn=False)
+                val_metrics = evaluate_model(
+                    validation_detector(qat_model, config), val_loader, device,
+                    include_rpn=False,
+                )
                 print("QAT validation completed", flush=True)
                 benchmark_metrics = benchmark_inference(
                     qat_model,

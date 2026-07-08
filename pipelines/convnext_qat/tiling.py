@@ -65,3 +65,19 @@ class TiledDetector:
 
     def __call__(self, images):
         return [predict_tiled(self.model, image, **self.settings) for image in images]
+
+
+def validation_detector(model, config):
+    """Apply the configured deployment tiling path during best-checkpoint selection."""
+    if not config.get("validation", {}).get("tiled", False):
+        return model
+    tiling = config.get("inference", {}).get("tiling", {})
+    return TiledDetector(
+        model,
+        tile_size=tiling.get("tile_size", 960),
+        overlap=tiling.get("overlap", 0.25),
+        batch_size=tiling.get("batch_size", 1),
+        score_threshold=tiling.get("score_threshold", 0.05),
+        nms_threshold=tiling.get("nms_threshold", 0.5),
+        max_detections=tiling.get("max_detections", 300),
+    )

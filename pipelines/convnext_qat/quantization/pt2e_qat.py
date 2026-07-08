@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import copy
+import sysconfig
+import warnings
 from collections import OrderedDict
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 
 import torch
 from torch import nn
@@ -21,6 +25,15 @@ def _torchao_pt2e():
             "PT2E QAT requires torchao. Install the optional dependency with "
             "`pip install torchao`."
         ) from error
+    try:
+        torchao_version = version("torchao")
+    except PackageNotFoundError:
+        torchao_version = "unknown"
+    if not torchao_version.startswith("0.17."):
+        raise RuntimeError(
+            f"This pipeline is validated with torchao 0.17.x, found {torchao_version}. "
+            "Install `torchao==0.17.0`."
+        )
     return prepare_qat_pt2e, convert_pt2e, X86InductorQuantizer, xiq, move_exported_model_to_eval
 
 
@@ -78,11 +91,18 @@ class PT2EConvNeXtFPNBackbone(nn.Module):
         return self.fpn(features) if self.fpn is not None else features
 
 
-def _dynamic_shapes(example_batch_size, maximum_batch_size, minimum_side, maximum_side):
+def _dynamic_shapes(example_batch_size, maximum_batch_size, minimum_side, maximum_side,
+                    spatial_divisor=32):
     # ConvNeXt downsamples by 32. Expressing this relation explicitly avoids
     # torch.export constraint violations while retaining variable image shapes.
-    height = 32 * Dim("image_h_div_32", min=max(1, minimum_side // 32), max=maximum_side // 32)
-    width = 32 * Dim("image_w_div_32", min=max(1, minimum_side // 32), max=maximum_side // 32)
+    height = spatial_divisor * Dim(
+        f"image_h_div_{spatial_divisor}", min=max(1, minimum_side // spatial_divisor),
+        max=maximum_side // spatial_divisor,
+    )
+    width = spatial_divisor * Dim(
+        f"image_w_div_{spatial_divisor}", min=max(1, minimum_side // spatial_divisor),
+        max=maximum_side // spatial_divisor,
+    )
     if maximum_batch_size > 1 and example_batch_size == 1:
         raise ValueError(
             "Dynamic batch export needs pt2e.example_batch_size >= 2; "
@@ -109,8 +129,14 @@ def prepare_pt2e_backbone_qat(model, config, inplace=False):
     maximum_side = int(pt2e.get("maximum_image_side", config["model"].get("max_size", 1600)))
     example_height = int(pt2e.get("example_height", min(960, maximum_side)))
     example_width = int(pt2e.get("example_width", min(1280, maximum_side)))
-    if any(value <= 0 or value % 32 for value in (minimum_side, maximum_side, example_height, example_width)):
-        raise ValueError("PT2E image dimensions must be positive multiples of 32")
+    spatial_divisor = 64 if scope == "backbone_fpn" else 32
+    if any(
+        value <= 0 or value % spatial_divisor
+        for value in (minimum_side, maximum_side, example_height, example_width)
+    ):
+        raise ValueError(
+            f"PT2E {scope} image dimensions must be positive multiples of {spatial_divisor}"
+        )
     if maximum_batch < example_batch:
         raise ValueError("pt2e.maximum_batch_size must be >= example_batch_size")
 
@@ -126,6 +152,7 @@ def prepare_pt2e_backbone_qat(model, config, inplace=False):
         (example,),
         dynamic_shapes=_dynamic_shapes(
             example_batch, maximum_batch, minimum_side, maximum_side,
+            spatial_divisor,
         ),
     ).module()
     prepare_qat_pt2e, _, quantizer_type, xiq, _ = _torchao_pt2e()
@@ -138,7 +165,37 @@ def prepare_pt2e_backbone_qat(model, config, inplace=False):
     prepared_model.pt2e_quantized_region = (
         "backbone.body" if scope == "backbone" else "backbone.body+fpn"
     )
+    if scope == "backbone_fpn":
+        # FPN creates additional parity guards. Faster R-CNN must therefore pad
+        # its internal ImageList to 64 instead of the normal ConvNeXt stride 32.
+        prepared_model.transform.size_divisible = 64
     return prepared_model
+
+
+def set_pt2e_qat_phase(model, phase):
+    """Set observer-only warmup, full fake-quant QAT, or frozen ranges."""
+    if phase not in {"observer_warmup", "full", "frozen"}:
+        raise ValueError("PT2E phase must be observer_warmup, full, or frozen")
+    required_methods = {
+        "enable_observer", "disable_observer", "enable_fake_quant", "disable_fake_quant",
+    }
+    fake_quantizers = [
+        module for module in model.modules()
+        if required_methods.issubset(dir(module))
+    ]
+    if not fake_quantizers:
+        raise RuntimeError("No PT2E fake-quant modules found")
+    for module in fake_quantizers:
+        if phase == "observer_warmup":
+            module.enable_observer()
+            module.disable_fake_quant()
+        elif phase == "full":
+            module.enable_observer()
+            module.enable_fake_quant()
+        else:
+            module.disable_observer()
+            module.enable_fake_quant()
+    return len(fake_quantizers)
 
 
 def convert_pt2e_backbone(model, inplace=False, compile_region=False):
@@ -150,9 +207,66 @@ def convert_pt2e_backbone(model, inplace=False, compile_region=False):
     converted_model.cpu()
     converted_region = convert_pt2e(converted_model.backbone.body_region)
     move_to_eval(converted_region)
-    if compile_region:
-        converted_region = torch.compile(converted_region)
     converted_model.backbone.body_region = converted_region
     converted_model.eval()
-    converted_model.pt2e_compiled = bool(compile_region)
+    converted_model.pt2e_compiled = False
+    if compile_region:
+        compile_pt2e_region(converted_model)
     return converted_model
+
+
+def compile_pt2e_region(model):
+    """Compile only the converted tensor graph, leaving detection control flow eager."""
+    python_header = Path(sysconfig.get_paths()["include"]) / "Python.h"
+    if not python_header.is_file():
+        raise RuntimeError(
+            f"torch.compile x86 requires Python development headers; missing {python_header}. "
+            "Install python3-dev (or use a Kaggle image that provides Python.h)."
+        )
+    model.backbone.body_region = torch.compile(model.backbone.body_region)
+    model.pt2e_compiled = True
+    return model
+
+
+def save_pt2e_int8_artifact(path, model, metrics=None, extra=None):
+    """Persist converted graph tensors without pickling the non-portable GraphModule."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({
+        "model": model.state_dict(),
+        "metrics": metrics or {},
+        "extra": {**(extra or {}), "format": "pt2e_int8_state_dict"},
+    }, path)
+    return path
+
+
+def load_pt2e_int8_artifact(path, config, compile_region=False):
+    from ..models import build_fasterrcnn_convnext
+
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    if payload.get("extra", {}).get("format") != "pt2e_int8_state_dict":
+        raise ValueError("Not a PT2E INT8 state-dict artifact")
+    model = prepare_pt2e_backbone_qat(build_fasterrcnn_convnext(config), config)
+    # Conversion establishes the quantized_decomposed topology. Empty observer
+    # defaults are immediately replaced by the stored converted tensors below.
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="must run observer before calling calculate_qparams")
+        model = convert_pt2e_backbone(model, inplace=True, compile_region=False)
+    current_buffers = dict(model.named_buffers())
+    for name, value in payload["model"].items():
+        current = current_buffers.get(name)
+        if current is None or current.shape == value.shape:
+            continue
+        module_name, _, buffer_name = name.rpartition(".")
+        module = model.get_submodule(module_name) if module_name else model
+        if buffer_name not in module._buffers:
+            raise RuntimeError(f"PT2E artifact parameter shape mismatch: {name}")
+        # Per-channel qparams are data-dependent. An uncalibrated reconstruction
+        # initially creates scalar placeholders; resize those registered buffers
+        # before the strict state load.
+        module._buffers[buffer_name] = torch.empty_like(value)
+    model.load_state_dict(payload["model"], strict=True)
+    model.cpu().eval()
+    if compile_region:
+        compile_pt2e_region(model)
+    return model, payload

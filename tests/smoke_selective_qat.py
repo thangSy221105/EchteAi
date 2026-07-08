@@ -46,7 +46,7 @@ def main():
     losses = model([image], [target])
     assert all(torch.isfinite(value) for value in losses.values())
 
-    qat = prepare_selective_qat(model, "M3", "x86")
+    qat = prepare_selective_qat(model, "M3", "auto")
     set_qat_phase(qat, "full")
     qat.train()
     qat_losses = qat([image], [target])

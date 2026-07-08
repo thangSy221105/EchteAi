@@ -18,6 +18,9 @@ augmentation:
   saturation: 0.05
   hue: 0.02
 
+validation:
+  tiled: false
+
 model:
   backbone: convnext_tiny          # convnext_tiny or convnext_small
   pretrained_backbone: true
@@ -28,6 +31,7 @@ model:
   max_size: 1024
   anchor_sizes: auto
   anchor_statistics_min_size: 640
+  focal_alpha: null
   aspect_ratios: [0.5, 1.0, 2.0]
   rpn_pre_nms_top_n_train: 2000
   rpn_pre_nms_top_n_test: 1000
@@ -51,12 +55,14 @@ training:
 
 quantization:
   variant: M3
-  backend: x86
+  backend: auto
   calibration_images: 256
   weight_only_warmup_epochs: 2
   observer_freeze_epochs: 2
   pt2e:
     region: backbone
+    observer_warmup_epochs: 1
+    observer_freeze_epochs: 1
     example_batch_size: 2
     maximum_batch_size: 2
     minimum_image_side: 256
@@ -100,6 +106,8 @@ output:
   pt2e_qat_best: outputs/convnext_qat/pt2e_qat_best.pt
   pt2e_qat_last: outputs/convnext_qat/pt2e_qat_last.pt
   pt2e_benchmark_json: outputs/convnext_qat/pt2e_benchmark.json
+  pt2e_int8_model: outputs/convnext_qat/pt2e_int8.pt
+  pt2e_int8_evaluation: outputs/convnext_qat/pt2e_int8_evaluation.json
 
 benchmark:
   warmup_iterations: 50

@@ -22,15 +22,15 @@ setup(
         "requests",
         "tqdm",
         "numpy",
-        "torch",
-        "torchvision",
+        "torch>=2.6,<2.13",
+        "torchvision>=0.21,<0.28",
         "Pillow",
         "PyYAML",
         "opencv-python",
         "matplotlib",
         "onnx"
     ],
-    extras_require={"coco": ["pycocotools"], "pt2e": ["torchao"]},
+    extras_require={"coco": ["pycocotools"], "pt2e": ["torchao==0.17.0"]},
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: MIT License",

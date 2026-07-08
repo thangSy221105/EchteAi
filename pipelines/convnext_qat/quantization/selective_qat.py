@@ -103,14 +103,24 @@ def _regions_from_module_names(module_names):
 
 
 def prepare_selective_qat(
-    model, variant="M3", backend="x86", inplace=False, quantized_modules=None,
+    model, variant="M3", backend="auto", inplace=False, quantized_modules=None,
 ):
     """Insert fake quant only into regions selected by M0-M4."""
     variant = _validate_variant(variant)
-    if backend not in torch.backends.quantized.supported_engines:
+    supported = list(torch.backends.quantized.supported_engines)
+    requested_backend = str(backend).lower()
+    if requested_backend == "auto":
+        backend = next(
+            (candidate for candidate in ("x86", "onednn", "fbgemm", "qnnpack") if candidate in supported),
+            None,
+        )
+    elif requested_backend == "x86" and "x86" not in supported and "onednn" in supported:
+        print("quantized backend x86 unavailable; using onednn", flush=True)
+        backend = "onednn"
+    if backend not in supported:
         raise ValueError(
             f"Quantized backend {backend!r} is unavailable; supported: "
-            f"{torch.backends.quantized.supported_engines}"
+            f"{supported}"
         )
     torch.backends.quantized.engine = backend
     qat_model = model if inplace else copy.deepcopy(model)

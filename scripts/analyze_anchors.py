@@ -25,6 +25,7 @@ def main():
         target_min_size=model.get("anchor_statistics_min_size", model.get("min_size", 960)),
         max_size=model.get("max_size", 1600),
         ignore_category_ids=config["dataset"].get("ignore_category_ids", []),
+        training_tiling=config.get("augmentation", {}).get("tiling"),
     )
     rendered = json.dumps(result, indent=2)
     print(rendered)
