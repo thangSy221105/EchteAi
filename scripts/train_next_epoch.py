@@ -23,6 +23,7 @@ def parse_args():
     parser.add_argument("--stage", choices=["fp32", "qat", "pt2e"], required=True)
     parser.add_argument("--variant", choices=["M0", "M1", "M2", "M3", "M4"])
     parser.add_argument("--limit", type=int)
+    parser.add_argument("--resume", help="override the checkpoint used for the next epoch")
     return parser.parse_args()
 
 
@@ -42,10 +43,14 @@ def main():
         total = int(config["training"]["fp32_epochs"])
         use_ddp = torch.cuda.is_available() and torch.cuda.device_count() >= 2
         script = "scripts/train_fp32_ddp.py" if use_ddp else "scripts/train_fp32.py"
+        if args.resume:
+            last = Path(args.resume)
     elif args.stage == "qat":
         last = Path(config["output"]["qat_last"])
         total = int(config["training"]["qat_epochs"])
         script = "scripts/train_qat.py"
+        if args.resume:
+            last = Path(args.resume)
         fp32_best = Path(config["output"]["fp32_best"])
         fp32_completed = checkpoint_epoch(config["output"]["fp32_last"])
         fp32_total = int(config["training"]["fp32_epochs"])
@@ -61,6 +66,8 @@ def main():
         ))
         total = int(config["training"].get("pt2e_qat_epochs", 3))
         script = "scripts/train_pt2e_qat.py"
+        if args.resume:
+            last = Path(args.resume)
         fp32_best = Path(config["output"]["fp32_best"])
         fp32_completed = checkpoint_epoch(config["output"]["fp32_last"])
         fp32_total = int(config["training"]["fp32_epochs"])
