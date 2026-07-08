@@ -40,7 +40,8 @@ def main():
     if args.stage == "fp32":
         last = Path(config["output"]["fp32_last"])
         total = int(config["training"]["fp32_epochs"])
-        script = "scripts/train_fp32.py"
+        use_ddp = torch.cuda.is_available() and torch.cuda.device_count() >= 2
+        script = "scripts/train_fp32_ddp.py" if use_ddp else "scripts/train_fp32.py"
     elif args.stage == "qat":
         last = Path(config["output"]["qat_last"])
         total = int(config["training"]["qat_epochs"])
@@ -81,6 +82,17 @@ def main():
     ]
     if last.is_file():
         command += ["--resume", str(last)]
+    if args.stage == "fp32" and script.endswith("_ddp.py"):
+        command = [
+            sys.executable, "-m", "torch.distributed.run",
+            "--standalone",
+            f"--nproc_per_node={min(2, torch.cuda.device_count())}",
+            script,
+            "--config", args.config,
+            "--epochs-this-run", "1",
+        ]
+        if last.is_file():
+            command += ["--resume", str(last)]
     if args.stage == "qat" and args.variant:
         command += ["--variant", args.variant]
     if args.limit is not None:

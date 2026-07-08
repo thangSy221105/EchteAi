@@ -1,0 +1,4 @@
+# Versions used by the PT2E end-to-end smoke tests.
+torch==2.12.1
+torchvision==0.27.1
+torchao==0.17.0
