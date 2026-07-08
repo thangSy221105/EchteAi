@@ -10,9 +10,6 @@ from torch.utils.data import DataLoader, Subset
 from torchvision.transforms import ColorJitter
 from torchvision.transforms.functional import pil_to_tensor
 
-from .tiling import tile_origins
-
-
 class CocoDetectionDataset(torch.utils.data.Dataset):
     def __init__(self, image_dir, annotation_path, training=False, augmentation=None):
         self.image_dir = Path(image_dir)
@@ -100,68 +97,6 @@ class CocoDetectionDataset(torch.utils.data.Dataset):
         return image, target
 
 
-class TiledCocoDetectionDataset(torch.utils.data.Dataset):
-    """Expose overlapping image crops while preserving boxes visible in each crop."""
-
-    def __init__(self, dataset, tile_size=960, overlap=0.25, keep_empty_probability=0.1,
-                 min_visible_fraction=0.5):
-        self.dataset = dataset
-        self.horizontal_flip_probability = dataset.horizontal_flip_probability
-        dataset.horizontal_flip_probability = 0.0
-        self.tile_size = int(tile_size)
-        self.overlap = float(overlap)
-        self.min_visible_fraction = float(min_visible_fraction)
-        if self.tile_size <= 0 or not 0.0 <= self.overlap < 1.0:
-            raise ValueError("tile_size must be positive and overlap must be in [0, 1)")
-        self.tiles = []
-        for index, info in enumerate(dataset.images):
-            annotations = dataset.annotations[info["id"]]
-            for top in tile_origins(int(info["height"]), self.tile_size, self.overlap):
-                for left in tile_origins(int(info["width"]), self.tile_size, self.overlap):
-                    has_center = any(
-                        left <= float(a["bbox"][0]) + float(a["bbox"][2]) / 2 < left + self.tile_size
-                        and top <= float(a["bbox"][1]) + float(a["bbox"][3]) / 2 < top + self.tile_size
-                        for a in annotations
-                    )
-                    # Deterministic background subsampling makes resume/DDP reproducible.
-                    selector = ((int(info["id"]) * 73856093 + left * 19349663 + top * 83492791) % 10000) / 10000
-                    if has_center or selector < float(keep_empty_probability):
-                        self.tiles.append((index, left, top))
-        if not self.tiles:
-            raise ValueError("Tiling produced an empty training dataset")
-
-    def __len__(self):
-        return len(self.tiles)
-
-    def __getitem__(self, index):
-        image_index, left, top = self.tiles[index]
-        image, target = self.dataset[image_index]
-        height, width = image.shape[-2:]
-        right, bottom = min(left + self.tile_size, width), min(top + self.tile_size, height)
-        boxes = target["boxes"].clone()
-        original_area = ((boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])).clamp(min=1e-6)
-        boxes[:, 0::2] = boxes[:, 0::2].clamp(min=left, max=right) - left
-        boxes[:, 1::2] = boxes[:, 1::2].clamp(min=top, max=bottom) - top
-        clipped_area = ((boxes[:, 2] - boxes[:, 0]).clamp(min=0) * (boxes[:, 3] - boxes[:, 1]).clamp(min=0))
-        keep = (clipped_area > 0) & (clipped_area / original_area >= self.min_visible_fraction)
-        target = {
-            **target,
-            "boxes": boxes[keep],
-            "labels": target["labels"][keep],
-            "area": clipped_area[keep],
-            "iscrowd": target["iscrowd"][keep],
-        }
-        image = image[:, top:bottom, left:right]
-        if torch.rand(()) < self.horizontal_flip_probability:
-            image = image.flip(-1)
-            crop_width = image.shape[-1]
-            old_x1 = target["boxes"][:, 0].clone()
-            old_x2 = target["boxes"][:, 2].clone()
-            target["boxes"][:, 0] = crop_width - old_x2
-            target["boxes"][:, 2] = crop_width - old_x1
-        return image, target
-
-
 def detection_collate(batch):
     return tuple(zip(*batch))
 
@@ -182,19 +117,6 @@ def build_coco_loader(config, split, shuffle=None, limit=None, batch_size=None):
             f"dataset.num_classes={dataset_cfg['num_classes']} but {split} annotations "
             f"contain {len(dataset.category_id_to_label)} foreground categories"
         )
-    tiling = config.get("augmentation", {}).get("tiling", {})
-    if split == "train" and tiling.get("enabled", False):
-        dataset = TiledCocoDetectionDataset(
-            dataset,
-            tile_size=tiling.get("tile_size", 960),
-            overlap=tiling.get("overlap", 0.25),
-            keep_empty_probability=tiling.get("keep_empty_probability", 0.1),
-            min_visible_fraction=tiling.get("min_visible_fraction", 0.5),
-        )
-        print(
-            f"training tiling enabled: crops={len(dataset)} size={dataset.tile_size} "
-            f"overlap={dataset.overlap:.2f}", flush=True,
-        )
     if limit is not None:
         dataset = Subset(dataset, range(min(int(limit), len(dataset))))
     if shuffle is None:
@@ -210,6 +132,6 @@ def build_coco_loader(config, split, shuffle=None, limit=None, batch_size=None):
 
 
 def unwrap_coco_dataset(dataset):
-    while isinstance(dataset, (Subset, TiledCocoDetectionDataset)):
+    while isinstance(dataset, Subset):
         dataset = dataset.dataset
     return dataset

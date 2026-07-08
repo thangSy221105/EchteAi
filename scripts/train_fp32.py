@@ -17,7 +17,6 @@ from pipelines.convnext_qat.engine import (
 )
 from pipelines.convnext_qat.metrics import evaluate_model
 from pipelines.convnext_qat.models import build_fasterrcnn_convnext
-from pipelines.convnext_qat.tiling import validation_detector
 
 
 def parse_args():
@@ -110,8 +109,8 @@ def main():
         print(f"saved pre-validation FP32 checkpoint: {config['output']['fp32_last']}", flush=True)
         print("FP32 validation started", flush=True)
         val_metrics = evaluate_model(
-            validation_detector(model, config), val_loader, device,
-            include_rpn=not config.get("validation", {}).get("tiled", False),
+            model, val_loader, device,
+            include_rpn=True,
         )
         print("FP32 validation completed", flush=True)
         benchmark_metrics = benchmark_inference(

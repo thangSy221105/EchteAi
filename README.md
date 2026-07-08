@@ -48,7 +48,7 @@ python scripts/benchmark.py --config configs/fasterrcnn_convnext_qat.yaml
 python scripts/visualize_fp32_int8.py --config configs/fasterrcnn_convnext_qat.yaml
 ```
 
-## Small-object anchors and overlapping tiles
+## Small-object anchors
 
 The SeaDronesSee config derives its five P2-P6 anchor scales from the resized
 training bounding boxes (`model.anchor_sizes: auto`). Inspect the exact values:
@@ -57,20 +57,8 @@ training bounding boxes (`model.anchor_sizes: auto`). Inspect the exact values:
 python scripts/analyze_anchors.py --config configs/seadronessee_colab.yaml
 ```
 
-Overlapping training crops are configured under `augmentation.tiling`. Crops
-containing object centres are retained together with a small, configurable
-sample of background crops. Full-image tiled evaluation shifts every crop's
-boxes back to global coordinates and performs class-aware NMS:
-
-```bash
-python scripts/evaluate.py --config configs/seadronessee_colab.yaml \
-  --model fp32 --split val --tiled --skip-rpn-metrics
-```
-
 Changing anchor scales changes RPN training behaviour, so start a new FP32 run
-rather than resuming a checkpoint trained with the old anchors. Tiling preserves
-small-object pixels but costs additional forward passes; compare it against the
-normal full-image evaluation as an ablation.
+rather than resuming a checkpoint trained with the old anchors.
 
 ## ConvNeXt selective QAT
 

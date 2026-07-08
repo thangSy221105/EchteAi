@@ -18,7 +18,6 @@ from pipelines.convnext_qat.engine import (
 from pipelines.convnext_qat.metrics import evaluate_model
 from pipelines.convnext_qat.models import build_fasterrcnn_convnext
 from pipelines.convnext_qat.quantization import convert_selective_qat, prepare_selective_qat, set_qat_phase
-from pipelines.convnext_qat.tiling import validation_detector
 
 
 def parse_args():
@@ -143,7 +142,7 @@ def main():
         print(f"saved pre-validation QAT checkpoint: {config['output']['qat_last']}", flush=True)
         print("QAT validation started", flush=True)
         val_metrics = evaluate_model(
-            validation_detector(qat_model, config), val_loader, device, include_rpn=False,
+            qat_model, val_loader, device, include_rpn=True,
         )
         print("QAT validation completed", flush=True)
         benchmark_metrics = benchmark_inference(

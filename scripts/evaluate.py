@@ -15,9 +15,6 @@ from pipelines.convnext_qat.data import build_coco_loader
 from pipelines.convnext_qat.metrics import evaluate_model, save_metrics
 from pipelines.convnext_qat.models import build_fasterrcnn_convnext
 from pipelines.convnext_qat.quantization import convert_selective_qat, prepare_selective_qat
-from pipelines.convnext_qat.tiling import TiledDetector
-
-
 def load_model(config, kind, checkpoint, device):
     model = build_fasterrcnn_convnext(config)
     if kind == "fp32":
@@ -53,7 +50,6 @@ def parse_args():
     parser.add_argument("--limit", type=int)
     parser.add_argument("--output")
     parser.add_argument("--skip-rpn-metrics", action="store_true")
-    parser.add_argument("--tiled", action="store_true", help="Use overlapping tiled inference")
     return parser.parse_args()
 
 
@@ -66,20 +62,9 @@ def main():
     loader = build_coco_loader(config, args.split, shuffle=False, limit=args.limit)
     model = load_model(config, args.model, checkpoint, device)
     base_model = model
-    if args.tiled:
-        tiling = config.get("inference", {}).get("tiling", {})
-        model = TiledDetector(
-            model,
-            tile_size=tiling.get("tile_size", 960),
-            overlap=tiling.get("overlap", 0.25),
-            batch_size=tiling.get("batch_size", 1),
-            score_threshold=tiling.get("score_threshold", 0.05),
-            nms_threshold=tiling.get("nms_threshold", 0.5),
-            max_detections=tiling.get("max_detections", 300),
-        )
     metrics = evaluate_model(
         model, loader, device,
-        include_rpn=not args.skip_rpn_metrics and not args.tiled,
+        include_rpn=not args.skip_rpn_metrics,
     )
     metrics["model_size_mb"] = model_state_size_mb(base_model)
     metrics["parameters"] = int(base_model.logical_parameter_count)

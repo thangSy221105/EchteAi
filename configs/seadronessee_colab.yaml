@@ -19,25 +19,8 @@ augmentation:
   contrast: 0.1
   saturation: 0.05
   hue: 0.02
-  tiling:
-    enabled: true
-    tile_size: 960
-    overlap: 0.25
-    keep_empty_probability: 0.10
-    min_visible_fraction: 0.50
 
-inference:
-  tiling:
-    tile_size: 960
-    overlap: 0.25
-    batch_size: 1
-    score_threshold: 0.05
-    nms_threshold: 0.50
-    max_detections: 300
-
-validation:
-  # Use the same overlap/merge path used at deployment when selecting best checkpoints.
-  tiled: true
+validation: {}
 
 model:
   backbone: convnext_tiny

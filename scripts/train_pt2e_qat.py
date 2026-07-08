@@ -21,7 +21,6 @@ from pipelines.convnext_qat.quantization import (
     convert_pt2e_backbone, prepare_pt2e_backbone_qat, save_pt2e_int8_artifact,
     set_pt2e_qat_phase,
 )
-from pipelines.convnext_qat.tiling import validation_detector
 
 
 def parse_args():
@@ -119,7 +118,7 @@ def main():
         )
         print(f"Saved pre-validation PT2E checkpoint: {last_path}", flush=True)
         validation = evaluate_model(
-            validation_detector(model, config), val_loader, device, include_rpn=False,
+            model, val_loader, device, include_rpn=True,
         )
         timing = benchmark_inference(
             model, val_loader, device,
@@ -137,8 +136,8 @@ def main():
             print("Converting best PT2E checkpoint and evaluating real INT8 on CPU...", flush=True)
             int8_model = convert_pt2e_backbone(model, inplace=False, compile_region=False)
             int8_metrics = evaluate_model(
-                validation_detector(int8_model, config), val_loader, torch.device("cpu"),
-                include_rpn=False,
+                int8_model, val_loader, torch.device("cpu"),
+                include_rpn=True,
             )
             save_pt2e_int8_artifact(
                 int8_path, int8_model, int8_metrics,

@@ -29,7 +29,6 @@ from pipelines.convnext_qat.checkpoint import load_checkpoint, save_checkpoint  
 from pipelines.convnext_qat.config import load_config, quantized_modules_for_variant  # noqa: E402
 from pipelines.convnext_qat.data import (  # noqa: E402
     CocoDetectionDataset,
-    TiledCocoDetectionDataset,
     build_coco_loader,
     detection_collate,
 )
@@ -46,7 +45,6 @@ from pipelines.convnext_qat.quantization import (  # noqa: E402
     prepare_selective_qat,
     set_qat_phase,
 )
-from pipelines.convnext_qat.tiling import validation_detector  # noqa: E402
 
 
 def parse_args():
@@ -109,20 +107,6 @@ def build_distributed_loader(config, split, rank, world_size, limit=None, batch_
         raise ValueError(
             f"dataset.num_classes={dataset_cfg['num_classes']} but {split} annotations "
             f"contain {len(dataset.category_id_to_label)} foreground categories"
-        )
-    tiling = config.get("augmentation", {}).get("tiling", {})
-    if split == "train" and tiling.get("enabled", False):
-        dataset = TiledCocoDetectionDataset(
-            dataset,
-            tile_size=tiling.get("tile_size", 960),
-            overlap=tiling.get("overlap", 0.25),
-            keep_empty_probability=tiling.get("keep_empty_probability", 0.1),
-            min_visible_fraction=tiling.get("min_visible_fraction", 0.5),
-        )
-        rank0_print(
-            rank,
-            f"training tiling enabled: crops={len(dataset)} size={dataset.tile_size} "
-            f"overlap={dataset.overlap:.2f}",
         )
     if limit is not None:
         dataset = Subset(dataset, range(min(int(limit), len(dataset))))
@@ -363,8 +347,8 @@ def main():
                 print(f"saved pre-validation QAT checkpoint: {config['output']['qat_last']}", flush=True)
                 print("QAT validation started on rank0", flush=True)
                 val_metrics = evaluate_model(
-                    validation_detector(qat_model, config), val_loader, device,
-                    include_rpn=False,
+                    qat_model, val_loader, device,
+                    include_rpn=True,
                 )
                 print("QAT validation completed", flush=True)
                 benchmark_metrics = benchmark_inference(

@@ -18,8 +18,7 @@ augmentation:
   saturation: 0.05
   hue: 0.02
 
-validation:
-  tiled: false
+validation: {}
 
 model:
   backbone: convnext_tiny          # convnext_tiny or convnext_small

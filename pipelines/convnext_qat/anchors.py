@@ -8,8 +8,6 @@ from pathlib import Path
 
 import torch
 
-from .tiling import tile_origins
-
 
 def _kmeans_1d(values: torch.Tensor, clusters: int, iterations: int = 100) -> torch.Tensor:
     """Deterministic k-means in log space, robust to long-tailed box sizes."""
@@ -32,7 +30,7 @@ def _kmeans_1d(values: torch.Tensor, clusters: int, iterations: int = 100) -> to
 
 
 def infer_anchor_statistics(annotation_path, target_min_size=960, max_size=1600, levels=5,
-                            ignore_category_ids=(), training_tiling=None):
+                            ignore_category_ids=()):
     """Infer anchor scales/ratios from COCO boxes after detector-style resizing."""
     annotation_path = Path(annotation_path)
     with annotation_path.open("r", encoding="utf-8") as handle:
@@ -51,36 +49,12 @@ def infer_anchor_statistics(annotation_path, target_min_size=960, max_size=1600,
         if width <= 0 or height <= 0 or image_size is None:
             continue
         image_width, image_height = image_size
-        if training_tiling and training_tiling.get("enabled", False):
-            tile_size = int(training_tiling.get("tile_size", 960))
-            overlap = float(training_tiling.get("overlap", 0.25))
-            minimum_visible = float(training_tiling.get("min_visible_fraction", 0.5))
-            x, y = map(float, annotation["bbox"][:2])
-            center_x, center_y = x + width / 2, y + height / 2
-            for top in tile_origins(int(image_height), tile_size, overlap):
-                for left in tile_origins(int(image_width), tile_size, overlap):
-                    right = min(left + tile_size, image_width)
-                    bottom = min(top + tile_size, image_height)
-                    if not (left <= center_x < right and top <= center_y < bottom):
-                        continue
-                    clipped_width = max(0.0, min(x + width, right) - max(x, left))
-                    clipped_height = max(0.0, min(y + height, bottom) - max(y, top))
-                    if clipped_width * clipped_height / (width * height) < minimum_visible:
-                        continue
-                    crop_width, crop_height = right - left, bottom - top
-                    resize = min(
-                        float(target_min_size) / min(crop_width, crop_height),
-                        float(max_size) / max(crop_width, crop_height),
-                    )
-                    scales.append(math.sqrt(clipped_width * clipped_height) * resize)
-                    ratios.append(clipped_width / clipped_height)
-        else:
-            resize = min(
-                float(target_min_size) / min(image_width, image_height),
-                float(max_size) / max(image_width, image_height),
-            )
-            scales.append(math.sqrt(width * height) * resize)
-            ratios.append(width / height)
+        resize = min(
+            float(target_min_size) / min(image_width, image_height),
+            float(max_size) / max(image_width, image_height),
+        )
+        scales.append(math.sqrt(width * height) * resize)
+        ratios.append(width / height)
     scale_tensor = torch.tensor(scales, dtype=torch.float64)
     ratio_tensor = torch.tensor(ratios, dtype=torch.float64)
     centers = _kmeans_1d(scale_tensor, levels)
@@ -117,7 +91,6 @@ def resolve_anchor_sizes(config):
         max_size=model_cfg.get("max_size", 1600),
         levels=5,
         ignore_category_ids=config["dataset"].get("ignore_category_ids", []),
-        training_tiling=config.get("augmentation", {}).get("tiling"),
     )
     sizes = tuple(statistics["anchor_sizes"])
     print(f"bbox-driven anchors={list(sizes)} boxes={statistics['boxes']}", flush=True)
