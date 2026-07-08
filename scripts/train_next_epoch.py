@@ -20,7 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/seadronessee_colab.yaml")
-    parser.add_argument("--stage", choices=["fp32", "qat"], required=True)
+    parser.add_argument("--stage", choices=["fp32", "qat", "pt2e"], required=True)
     parser.add_argument("--variant", choices=["M0", "M1", "M2", "M3", "M4"])
     parser.add_argument("--limit", type=int)
     return parser.parse_args()
@@ -41,7 +41,7 @@ def main():
         last = Path(config["output"]["fp32_last"])
         total = int(config["training"]["fp32_epochs"])
         script = "scripts/train_fp32.py"
-    else:
+    elif args.stage == "qat":
         last = Path(config["output"]["qat_last"])
         total = int(config["training"]["qat_epochs"])
         script = "scripts/train_qat.py"
@@ -54,6 +54,21 @@ def main():
             )
         if not fp32_best.is_file():
             raise FileNotFoundError(f"QAT requires the completed FP32 best checkpoint: {fp32_best}")
+    else:
+        last = Path(config["output"].get(
+            "pt2e_qat_last", Path(config["output"]["directory"]) / "pt2e_qat_last.pt",
+        ))
+        total = int(config["training"].get("pt2e_qat_epochs", 3))
+        script = "scripts/train_pt2e_qat.py"
+        fp32_best = Path(config["output"]["fp32_best"])
+        fp32_completed = checkpoint_epoch(config["output"]["fp32_last"])
+        fp32_total = int(config["training"]["fp32_epochs"])
+        if fp32_completed < fp32_total:
+            raise RuntimeError(
+                f"finish FP32 first: checkpoint is epoch {fp32_completed}/{fp32_total}"
+            )
+        if not fp32_best.is_file():
+            raise FileNotFoundError(f"PT2E QAT requires the completed FP32 best checkpoint: {fp32_best}")
 
     completed = checkpoint_epoch(last)
     if completed >= total:
