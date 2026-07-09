@@ -48,7 +48,8 @@ def main():
     elif args.stage == "qat":
         last = Path(config["output"]["qat_last"])
         total = int(config["training"]["qat_epochs"])
-        script = "scripts/train_qat.py"
+        use_ddp = torch.cuda.is_available() and torch.cuda.device_count() >= 2
+        script = "scripts/train_qat_ddp.py" if use_ddp else "scripts/train_qat.py"
         if args.resume:
             last = Path(args.resume)
         fp32_best = Path(config["output"]["fp32_best"])
@@ -90,6 +91,17 @@ def main():
     if last.is_file():
         command += ["--resume", str(last)]
     if args.stage == "fp32" and script.endswith("_ddp.py"):
+        command = [
+            sys.executable, "-m", "torch.distributed.run",
+            "--standalone",
+            f"--nproc_per_node={min(2, torch.cuda.device_count())}",
+            script,
+            "--config", args.config,
+            "--epochs-this-run", "1",
+        ]
+        if last.is_file():
+            command += ["--resume", str(last)]
+    if args.stage == "qat" and script.endswith("_ddp.py"):
         command = [
             sys.executable, "-m", "torch.distributed.run",
             "--standalone",
