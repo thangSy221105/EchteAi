@@ -1,4 +1,4 @@
-# EchteAI
+# EchteAI  
 
 Selective-QAT Faster R-CNN for SeaDronesSee, now flattened around a single
 root-level `pipelines/` package.
