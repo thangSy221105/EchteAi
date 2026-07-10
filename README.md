@@ -199,30 +199,29 @@ python scripts/compare_fp32_int8.py \
 
 | Run ID | Backbone | Kích thước ảnh | Epoch | mAP@50:95 | mAP@50 | AP small | AP medium | AP large | Ghi chú |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---|
-|  |  |  |  |  |  |  |  |  |  |
-
-### Eager selective QAT
-
-| Run ID | Variant | Epoch QAT | Frozen? | mAP@50:95 | mAP@50 | AP small | AR@100 | Ghi chú |
-|---|---|---:|---|---:|---:|---:|---:|---|
-|  |  |  |  |  |  |  |  |  |
+| FP32-CPU-01 | ConvNeXt-Tiny + FPN | 960 / 1600 | FP32 best | 0.5606 | 0.8210 |  |  |  | Accuracy=0.7351, Precision=0.8027, Mean IoU=0.8146, 6705.2876 ms/image |
 
 ### Checkpoint INT8 sau convert
 
 | Run ID | Checkpoint QAT nguồn | Backend | mAP@50:95 | mAP@50 | AP small | Mean latency ms/img | FPS | Kích thước model MB | Ghi chú |
 |---|---|---|---:|---:|---:|---:|---:|---:|---|
-|  |  |  |  |  |  |  |  |  |  |
+| INT8-CPU-OLD-E3 | qat_last epoch 3 old | eager selective | 0.2141 |  |  | 6326.2100 |  | 83.8874 | Accuracy=0.4459, Precision=0.7788, Mean IoU=0.6961 |
+| INT8-CPU-E3 | qat_last epoch 3 | eager selective | 0.3505 | 0.7310 |  | 6323.6697 |  | 83.8874 | Accuracy=0.5432, Precision=0.8375, Mean IoU=0.7539 |
+| INT8-CPU-E4 | qat_last epoch 4 | eager selective | 0.3310 | 0.6900 |  | 6708.8203 |  | 83.8874 | Accuracy=0.4718, Precision=0.8073, Mean IoU=0.7589 |
 
 ### Tóm tắt FP32 vs INT8
 
 | Metric | FP32 | INT8 | Delta |
 |---|---:|---:|---:|
-| mAP@50:95 |  |  |  |
-| mAP@50 |  |  |  |
+| mAP@50:95 | 0.5606 | 0.3505 | -0.2101 |
+| mAP@50 | 0.8210 | 0.7310 | -0.0900 |
 | AP small |  |  |  |
-| Mean latency ms/img |  |  |  |
+| Mean latency ms/img | 6705.2876 | 6323.6697 | -381.6179 |
 | FPS |  |  |  |
-| Kích thước model MB |  |  |  |
+| Kích thước backbone MB | 116.5970 | 30.1662 | -86.4308 |
+| Giảm kích thước backbone |  | 74.1278% |  |
+| Kích thước full model MB | 171.9961 | 83.8874 | -88.1087 |
+| Giảm kích thước full model |  | 51.2271% |  |
 
 ## Kết luận
 
