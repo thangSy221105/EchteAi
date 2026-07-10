@@ -1,4 +1,4 @@
-# EchteAI
+# Quantization 8bit FasterRCNN
 
 EchteAI là baseline phát hiện đối tượng trên SeaDronesSee được xây dựng quanh Faster R-CNN với backbone ConvNeXt-Tiny và FPN. Mục tiêu của repository này không phải là tạo ra một detector nhẹ tuyệt đối, mà là xây dựng một pipeline đủ mạnh ở FP32, sau đó áp dụng lượng tử hóa chọn lọc để khảo sát tradeoff giữa chất lượng và độ trễ khi triển khai INT8. Ở trạng thái hiện tại, nhánh ổn định nhất của repo là selective eager QAT; nhánh PT2E graph đã có trong code nhưng nhạy cảm hơn với môi trường.
 
