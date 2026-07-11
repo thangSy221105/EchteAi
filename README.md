@@ -10,11 +10,11 @@ EchteAI là baseline phát hiện đối tượng trên SeaDronesSee được x�
 
 GIF demo ngắn so sánh FP32 và INT8:
 
-![Demo FP32 vs INT8](./demo_fp32_vs_int8.gif)
+![Demo FP32 vs INT8](./demo_fp32_vs_int8_ver3epoch.gif)
 
 Video đầy đủ:
 
-[Tải video demo (.mp4)](./video_fp32_cpu_vs_int8_cpu.mp4)
+[Tải video demo (.mp4)](./video_fp32_cpu_vs_int8_cpu_ver3epoch.mp4)
 
 ## Tổng quan nhanh
 
