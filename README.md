@@ -1,6 +1,16 @@
-# Quantization 8bit FasterRCNN
+# EchteAI
 
 EchteAI là baseline phát hiện đối tượng trên SeaDronesSee được xây dựng quanh Faster R-CNN với backbone ConvNeXt-Tiny và FPN. Mục tiêu của repository này không phải là tạo ra một detector nhẹ tuyệt đối, mà là xây dựng một pipeline đủ mạnh ở FP32, sau đó áp dụng lượng tử hóa chọn lọc để khảo sát tradeoff giữa chất lượng và độ trễ khi triển khai INT8. Ở trạng thái hiện tại, nhánh ổn định nhất của repo là selective eager QAT; nhánh PT2E graph đã có trong code nhưng nhạy cảm hơn với môi trường.
+
+## Minh họa nhanh
+
+Ảnh ví dụ từ dataset SeaDronesSee:
+
+![Ảnh ví dụ SeaDronesSee](./image_sea.png)
+
+Video demo so sánh FP32 và INT8:
+
+[Mở video demo](./video_fp32_cpu_vs_int8_cpu.mp4)
 
 ## Tổng quan nhanh
 
@@ -118,6 +128,8 @@ Detections
 ```
 
 Cách hoạt động thực sự của eager island là như sau. Ở giai đoạn QAT, mỗi island được gắn fake-quant observer để mô phỏng tác động của lượng tử hóa lên activation và weight. Khi convert, từng island được thay bằng quantized operator thật trên CPU. Tuy nhiên dữ liệu không nằm mãi trong không gian INT8. Nó liên tục đi từ FP32 sang INT8 rồi quay lại FP32 ở ranh giới của từng island. Chính ranh giới này làm eager dễ triển khai hơn graph quantization, nhưng cũng là gốc của nhược điểm về hiệu năng.
+
+Điểm thường gây thắc mắc là tại sao không lượng tử hóa một lần ở đầu block rồi để tensor đi qua toàn bộ chuỗi phép toán ở dạng INT8. Lý do là eager selective quantization trong repo này chỉ bọc trực tiếp các phép toán được hỗ trợ tốt, chủ yếu là `Conv2d` và `Linear`. Trong một block thực tế của ConvNeXt hoặc FPN, giữa các phép tích chập còn có những phép như `LayerNorm`, `GELU`, cộng tắt residual, reshape hoặc tái tổ chức đặc trưng. Những phép này không phải lúc nào cũng được giữ liền mạch trong cùng miền INT8 ở nhánh eager hiện tại. Vì vậy cách triển khai an toàn là chỉ quantize ngay trước phép toán hỗ trợ, thực thi phép toán đó ở INT8, rồi dequantize trở lại FP32 để phần còn lại của block tiếp tục chạy bình thường. Nói cách khác, eager baseline hiện tại hoạt động theo logic “quantize ngay trước op hỗ trợ” chứ không phải “giữ cả block trong INT8 từ đầu đến cuối”.
 
 Nhược điểm lớn nhất của eager island là overhead quantize/dequantize lặp lại rất nhiều lần. Với một detector hai giai đoạn như Faster R-CNN, backbone chỉ là một phần của tổng latency, còn các phần như proposal decode, NMS, RoI Align, RoI heads và final postprocess vẫn ở FP32. Vì vậy dù trọng số của một số phần đã được nén xuống INT8, độ trễ end-to-end chưa chắc giảm tương xứng. Một nhược điểm khác là score distribution sau lượng tử hóa có thể bị lệch, kéo theo recall và AP giảm khá mạnh, đặc biệt trong bài toán vật thể nhỏ nơi chỉ một sai lệch nhỏ về activation range cũng có thể làm confidence tụt đáng kể.
 
