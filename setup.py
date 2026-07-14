@@ -30,7 +30,14 @@ setup(
         "matplotlib",
         "onnx"
     ],
-    extras_require={"coco": ["pycocotools"], "pt2e": ["torchao==0.17.0"]},
+    extras_require={
+        "coco": ["pycocotools"],
+        "pt2e": [
+            "torch>=2.11,<2.13",
+            "torchvision>=0.26,<0.28",
+            "torchao==0.17.0",
+        ],
+    },
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: MIT License",

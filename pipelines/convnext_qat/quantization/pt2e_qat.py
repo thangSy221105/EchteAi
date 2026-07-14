@@ -14,7 +14,28 @@ from torch import nn
 from torch.export import Dim, export
 
 
+def _normalized_version(value):
+    return tuple(int(part) for part in value.split("+", 1)[0].split(".")[:3])
+
+
+def _collect_pt2e_fake_quantizers(model):
+    required_methods = {
+        "enable_observer", "disable_observer", "enable_fake_quant", "disable_fake_quant",
+    }
+    return [
+        module for module in model.modules()
+        if required_methods.issubset(dir(module))
+    ]
+
+
 def _torchao_pt2e():
+    if _normalized_version(torch.__version__) < (2, 11, 0):
+        raise RuntimeError(
+            "PT2E QAT in this repo needs torch >= 2.11.0. "
+            f"Found torch {torch.__version__}. "
+            "Kaggle's default torch 2.10 image is too old for the torchao PT2E path here; "
+            "upgrade torch/torchvision first, then reinstall torchao and rerun the notebook."
+        )
     try:
         from torchao.quantization.pt2e.quantize_pt2e import convert_pt2e, prepare_qat_pt2e
         from torchao.quantization.pt2e.quantizer import x86_inductor_quantizer as xiq
@@ -159,6 +180,14 @@ def prepare_pt2e_backbone_qat(model, config, inplace=False):
     quantizer = quantizer_type()
     quantizer.set_global(xiq.get_default_x86_inductor_quantization_config(is_qat=True))
     prepared_region = prepare_qat_pt2e(exported, quantizer)
+    fake_quantizers = _collect_pt2e_fake_quantizers(prepared_region)
+    if not fake_quantizers:
+        raise RuntimeError(
+            "prepare_qat_pt2e completed but inserted no PT2E fake-quant modules. "
+            "This almost always means the active torch/torchao stack is incompatible. "
+            f"torch={torch.__version__}. "
+            "On Kaggle, reinstall a PT2E-compatible torch first, then rerun this notebook."
+        )
     prepared_model.backbone = PT2EConvNeXtFPNBackbone(
         prepared_region, backbone.fpn if scope == "backbone" else None, backbone.out_channels,
     )
@@ -176,15 +205,13 @@ def set_pt2e_qat_phase(model, phase):
     """Set observer-only warmup, full fake-quant QAT, or frozen ranges."""
     if phase not in {"observer_warmup", "full", "frozen"}:
         raise ValueError("PT2E phase must be observer_warmup, full, or frozen")
-    required_methods = {
-        "enable_observer", "disable_observer", "enable_fake_quant", "disable_fake_quant",
-    }
-    fake_quantizers = [
-        module for module in model.modules()
-        if required_methods.issubset(dir(module))
-    ]
+    fake_quantizers = _collect_pt2e_fake_quantizers(model)
     if not fake_quantizers:
-        raise RuntimeError("No PT2E fake-quant modules found")
+        raise RuntimeError(
+            "No PT2E fake-quant modules found on the prepared model. "
+            "The PT2E graph was likely created without QAT inserts because torch/torchao "
+            "are incompatible in this runtime."
+        )
     for module in fake_quantizers:
         if phase == "observer_warmup":
             module.enable_observer()
