@@ -11,6 +11,7 @@ dataset:
   test_annotations: /content/seadronessee/annotations/instances_val.json
   ignore_category_ids: [0]
   num_classes: 6
+  binary_collapse_foreground: false
   workers: 2
 
 augmentation:

@@ -16,6 +16,7 @@ class CocoDetectionDataset(torch.utils.data.Dataset):
         self.annotation_path = Path(annotation_path)
         self.training = training
         augmentation = augmentation or {}
+        self.binary_collapse_foreground = bool(augmentation.get("binary_collapse_foreground", False))
         self.ignore_category_ids = {
             int(category_id) for category_id in augmentation.get("ignore_category_ids", [])
         }
@@ -41,9 +42,14 @@ class CocoDetectionDataset(torch.utils.data.Dataset):
             ),
             key=lambda item: item["id"],
         )
-        self.category_id_to_label = {category["id"]: i + 1 for i, category in enumerate(categories)}
-        self.label_to_category_id = {label: category for category, label in self.category_id_to_label.items()}
-        self.label_to_name = {self.category_id_to_label[c["id"]]: c["name"] for c in categories}
+        if self.binary_collapse_foreground:
+            self.category_id_to_label = {category["id"]: 1 for category in categories}
+            self.label_to_category_id = {1: tuple(category["id"] for category in categories)}
+            self.label_to_name = {1: "foreground"}
+        else:
+            self.category_id_to_label = {category["id"]: i + 1 for i, category in enumerate(categories)}
+            self.label_to_category_id = {label: category for category, label in self.category_id_to_label.items()}
+            self.label_to_name = {self.category_id_to_label[c["id"]]: c["name"] for c in categories}
         self.annotations = defaultdict(list)
         for annotation in data.get("annotations", []):
             if (
@@ -110,12 +116,14 @@ def build_coco_loader(config, split, shuffle=None, limit=None, batch_size=None):
         augmentation={
             **(config.get("augmentation", {}) if split == "train" else {}),
             "ignore_category_ids": dataset_cfg.get("ignore_category_ids", []),
+            "binary_collapse_foreground": dataset_cfg.get("binary_collapse_foreground", False),
         },
     )
-    if int(dataset_cfg["num_classes"]) != len(dataset.category_id_to_label) + 1:
+    expected_num_classes = 2 if bool(dataset_cfg.get("binary_collapse_foreground", False)) else len(dataset.category_id_to_label) + 1
+    if int(dataset_cfg["num_classes"]) != expected_num_classes:
         raise ValueError(
             f"dataset.num_classes={dataset_cfg['num_classes']} but {split} annotations "
-            f"contain {len(dataset.category_id_to_label)} foreground categories"
+            f"contain {1 if bool(dataset_cfg.get('binary_collapse_foreground', False)) else len(dataset.category_id_to_label)} foreground categories"
         )
     if limit is not None:
         dataset = Subset(dataset, range(min(int(limit), len(dataset))))
