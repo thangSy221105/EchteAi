@@ -41,6 +41,7 @@ class ConvNeXtFPNBackbone(nn.Module):
         self.out_channels = out_channels
         self.feature_indices = (1, 3, 5, 7)
         self.pt2e_spatial_divisor = 32
+        self.pt2e_region_kind = "convnext"
 
         # A trainable stage includes the projection feeding it. This ensures that
         # trainable_layers=4 also trains the stem and every downsample projection.
@@ -105,6 +106,7 @@ class ResNetFPNBackbone(nn.Module):
         self.out_channels = out_channels
         self.feature_indices = (1, 2, 3, 4)
         self.pt2e_spatial_divisor = 32
+        self.pt2e_region_kind = "resnet50"
 
         stage_indices = tuple(range(len(self.body)))
         trainable_stage_indices = set(stage_indices[-trainable_layers:]) if trainable_layers else set()

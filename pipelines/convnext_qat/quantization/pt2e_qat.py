@@ -75,12 +75,49 @@ class BackboneBodyRegion(nn.Module):
         return tuple(outputs)
 
 
+class ResNet50BodyRegion(nn.Module):
+    """Explicit ResNet-50 export boundary with cloned C2-C5 outputs."""
+
+    def __init__(self, body):
+        super().__init__()
+        self.stem = body[0]
+        self.layer1 = body[1]
+        self.layer2 = body[2]
+        self.layer3 = body[3]
+        self.layer4 = body[4]
+
+    def forward(self, x):
+        x = self.stem(x)
+        c2 = self.layer1(x)
+        c3 = self.layer2(c2)
+        c4 = self.layer3(c3)
+        c5 = self.layer4(c4)
+        # Clone stage outputs before returning them so the quantizer sees
+        # single-use graph leaves rather than tensors that are both returned
+        # and consumed by subsequent stages.
+        return (c2.clone(), c3.clone(), c4.clone(), c5.clone())
+
+
 class BackboneBodyFPNRegion(nn.Module):
     """Optional second PT2E scope covering the backbone body and the complete FPN."""
 
     def __init__(self, body, fpn, feature_indices):
         super().__init__()
         self.body = BackboneBodyRegion(body, feature_indices)
+        self.fpn = fpn
+
+    def forward(self, x):
+        tensors = self.body(x)
+        features = OrderedDict((str(index), tensor) for index, tensor in enumerate(tensors))
+        return tuple(self.fpn(features).values())
+
+
+class ResNet50BodyFPNRegion(nn.Module):
+    """Optional PT2E scope covering explicit ResNet-50 body and full FPN."""
+
+    def __init__(self, body, fpn):
+        super().__init__()
+        self.body = ResNet50BodyRegion(body)
         self.fpn = fpn
 
     def forward(self, x):
@@ -165,11 +202,20 @@ def prepare_pt2e_backbone_qat(model, config, inplace=False):
     if maximum_batch < example_batch:
         raise ValueError("pt2e.maximum_batch_size must be >= example_batch_size")
 
-    region = (
-        BackboneBodyRegion(backbone.body, feature_indices)
-        if scope == "backbone"
-        else BackboneBodyFPNRegion(backbone.body, backbone.fpn, feature_indices)
-    ).cpu().eval()
+    region_kind = str(getattr(backbone, "pt2e_region_kind", "convnext")).lower()
+    if region_kind == "resnet50":
+        region = (
+            ResNet50BodyRegion(backbone.body)
+            if scope == "backbone"
+            else ResNet50BodyFPNRegion(backbone.body, backbone.fpn)
+        )
+    else:
+        region = (
+            BackboneBodyRegion(backbone.body, feature_indices)
+            if scope == "backbone"
+            else BackboneBodyFPNRegion(backbone.body, backbone.fpn, feature_indices)
+        )
+    region = region.cpu().eval()
     example = torch.randn(example_batch, 3, example_height, example_width)
     exported = export(
         region,

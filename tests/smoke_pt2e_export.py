@@ -8,11 +8,14 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pipelines.convnext_qat.models.convnext_fpn_backbone import ConvNeXtFPNBackbone, ResNetFPNBackbone
-from pipelines.convnext_qat.quantization.pt2e_qat import BackboneBodyRegion, _dynamic_shapes
+from pipelines.convnext_qat.quantization.pt2e_qat import BackboneBodyRegion, ResNet50BodyRegion, _dynamic_shapes
 
 
 def run_one(backbone, expected_channels, name):
-    region = BackboneBodyRegion(backbone.body, backbone.feature_indices).eval()
+    if getattr(backbone, "pt2e_region_kind", "") == "resnet50":
+        region = ResNet50BodyRegion(backbone.body).eval()
+    else:
+        region = BackboneBodyRegion(backbone.body, backbone.feature_indices).eval()
     example = torch.randn(2, 3, 256, 320)
     exported = torch.export.export(
         region,
