@@ -239,6 +239,11 @@ def _export_single_region(region, example, example_batch, maximum_batch,
     ).module()
 
 
+def _export_single_region_static(region, example):
+    """Export with fixed shape to avoid stage-specific dynamic guard blowups."""
+    return export(region, (example,)).module()
+
+
 def _prepare_resnet50_stagewise_qat(backbone, config):
     pt2e = config.get("quantization", {}).get("pt2e", {})
     example_batch = int(pt2e.get("example_batch_size", 1))
@@ -266,15 +271,11 @@ def _prepare_resnet50_stagewise_qat(backbone, config):
             example_height // input_divisor,
             example_width // input_divisor,
         )
-        exported = _export_single_region(
-            SingleTensorRegion(module).cpu().eval(),
-            example,
-            example_batch,
-            maximum_batch,
-            minimum_side // input_divisor,
-            maximum_side // input_divisor,
-            1,
-        )
+        # ResNet stem/downsample stages generate export guards that are much
+        # stricter than the generic image-size range. For the first graphized
+        # ResNet50 PT2E branch, prefer a static-shape export so we can validate
+        # graph-mode quantization before re-introducing dynamic-shape support.
+        exported = _export_single_region_static(SingleTensorRegion(module).cpu().eval(), example)
         prepared = prepare_qat_pt2e(exported, make_quantizer())
         fake_quantizers = _collect_pt2e_fake_quantizers(prepared)
         if not fake_quantizers:
