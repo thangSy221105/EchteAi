@@ -1,4 +1,4 @@
-"""Faster R-CNN assembly with a configurable ConvNeXt-FPN backbone."""
+"""Faster R-CNN assembly with a configurable FPN backbone."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from torchvision.models.detection import rpn as rpn_module
 from torchvision.models.detection.anchor_utils import AnchorGenerator
 from torchvision.ops import MultiScaleRoIAlign
 
-from .convnext_fpn_backbone import build_convnext_fpn_backbone
+from .convnext_fpn_backbone import build_fpn_backbone
 from ..anchors import resolve_anchor_sizes
 
 
@@ -224,7 +224,7 @@ def build_fasterrcnn_convnext(config):
     if num_classes < 2:
         raise ValueError("dataset.num_classes must include background and at least one class")
 
-    backbone = build_convnext_fpn_backbone(model_cfg)
+    backbone = build_fpn_backbone(model_cfg)
     min_size = model_cfg.get("train_min_sizes", model_cfg.get("min_size", 640))
     if isinstance(min_size, list):
         min_size = tuple(int(value) for value in min_size)

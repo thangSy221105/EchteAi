@@ -1,4 +1,4 @@
-"""ConvNeXt C2-C5 feature extraction with a torchvision FPN."""
+"""Backbone C2-C5 feature extraction with a torchvision FPN."""
 
 from collections import OrderedDict
 
@@ -7,8 +7,10 @@ from torch import nn
 from torchvision.models import (
     ConvNeXt_Small_Weights,
     ConvNeXt_Tiny_Weights,
+    ResNet50_Weights,
     convnext_small,
     convnext_tiny,
+    resnet50,
 )
 from torchvision.ops import FeaturePyramidNetwork
 from torchvision.ops.feature_pyramid_network import LastLevelMaxPool
@@ -37,6 +39,8 @@ class ConvNeXtFPNBackbone(nn.Module):
             stage_channels, out_channels, extra_blocks=LastLevelMaxPool()
         )
         self.out_channels = out_channels
+        self.feature_indices = (1, 3, 5, 7)
+        self.pt2e_spatial_divisor = 32
 
         # A trainable stage includes the projection feeding it. This ensures that
         # trainable_layers=4 also trains the stem and every downsample projection.
@@ -55,15 +59,86 @@ class ConvNeXtFPNBackbone(nn.Module):
         features = OrderedDict()
         for index, layer in enumerate(self.body):
             x = layer(x)
-            if index in (1, 3, 5, 7):
+            if index in self.feature_indices:
                 features[str(len(features))] = x
         return self.fpn(features)
 
 
-def build_convnext_fpn_backbone(model_config):
-    return ConvNeXtFPNBackbone(
-        variant=model_config.get("backbone", "convnext_tiny"),
+class _ResNetStem(nn.Module):
+    def __init__(self, network):
+        super().__init__()
+        self.conv1 = network.conv1
+        self.bn1 = network.bn1
+        self.relu = network.relu
+        self.maxpool = network.maxpool
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
+        return x
+
+
+class ResNetFPNBackbone(nn.Module):
+    """Expose ResNet stages as C2-C5 and return P2-P6 in an OrderedDict."""
+
+    def __init__(self, variant="resnet50", out_channels=256, pretrained=True, trainable_layers=5):
+        super().__init__()
+        if variant != "resnet50":
+            raise ValueError("Only resnet50 is currently supported for ResNet FPN")
+        if not 0 <= trainable_layers <= 5:
+            raise ValueError("trainable_backbone_layers must be between 0 and 5 for ResNet")
+
+        network = resnet50(weights=ResNet50_Weights.DEFAULT if pretrained else None)
+        self.body = nn.Sequential(
+            _ResNetStem(network),
+            network.layer1,
+            network.layer2,
+            network.layer3,
+            network.layer4,
+        )
+        stage_channels = [256, 512, 1024, 2048]
+        self.fpn = FeaturePyramidNetwork(
+            stage_channels, out_channels, extra_blocks=LastLevelMaxPool()
+        )
+        self.out_channels = out_channels
+        self.feature_indices = (1, 2, 3, 4)
+        self.pt2e_spatial_divisor = 32
+
+        stage_indices = tuple(range(len(self.body)))
+        trainable_stage_indices = set(stage_indices[-trainable_layers:]) if trainable_layers else set()
+        for index, child in enumerate(self.body):
+            requires_grad = index in trainable_stage_indices
+            for parameter in child.parameters():
+                parameter.requires_grad_(requires_grad)
+
+    def forward(self, x: torch.Tensor):
+        features = OrderedDict()
+        for index, layer in enumerate(self.body):
+            x = layer(x)
+            if index in self.feature_indices:
+                features[str(len(features))] = x
+        return self.fpn(features)
+
+
+def build_fpn_backbone(model_config):
+    variant = str(model_config.get("backbone", "convnext_tiny")).lower()
+    common_kwargs = dict(
         out_channels=int(model_config.get("fpn_out_channels", 256)),
         pretrained=bool(model_config.get("pretrained_backbone", True)),
-        trainable_layers=int(model_config.get("trainable_backbone_layers", 4)),
+        trainable_layers=int(
+            model_config.get("trainable_backbone_layers", 5 if variant == "resnet50" else 4)
+        ),
     )
+    if variant in _VARIANTS:
+        return ConvNeXtFPNBackbone(variant=variant, **common_kwargs)
+    if variant == "resnet50":
+        return ResNetFPNBackbone(variant=variant, **common_kwargs)
+    raise ValueError(
+        f"Unsupported backbone {variant!r}; choose {sorted(_VARIANTS) + ['resnet50']}"
+    )
+
+
+def build_convnext_fpn_backbone(model_config):
+    return build_fpn_backbone(model_config)

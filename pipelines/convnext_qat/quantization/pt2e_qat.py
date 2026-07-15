@@ -1,4 +1,4 @@
-"""Graph-mode PT2E QAT for the ConvNeXt body with an FP32 FPN/head boundary."""
+"""Graph-mode PT2E QAT for the backbone body with an FP32 FPN/head boundary."""
 
 from __future__ import annotations
 
@@ -58,28 +58,29 @@ def _torchao_pt2e():
     return prepare_qat_pt2e, convert_pt2e, X86InductorQuantizer, xiq, move_exported_model_to_eval
 
 
-class ConvNeXtBodyRegion(nn.Module):
+class BackboneBodyRegion(nn.Module):
     """Tensor-only export boundary returning C2-C5 as a stable tuple."""
 
-    def __init__(self, body):
+    def __init__(self, body, feature_indices):
         super().__init__()
         self.body = body
+        self.feature_indices = tuple(int(value) for value in feature_indices)
 
     def forward(self, x):
         outputs = []
         for index, layer in enumerate(self.body):
             x = layer(x)
-            if index in (1, 3, 5, 7):
+            if index in self.feature_indices:
                 outputs.append(x)
         return tuple(outputs)
 
 
-class ConvNeXtBodyFPNRegion(nn.Module):
-    """Optional second PT2E scope covering ConvNeXt and the complete FPN."""
+class BackboneBodyFPNRegion(nn.Module):
+    """Optional second PT2E scope covering the backbone body and the complete FPN."""
 
-    def __init__(self, body, fpn):
+    def __init__(self, body, fpn, feature_indices):
         super().__init__()
-        self.body = ConvNeXtBodyRegion(body)
+        self.body = BackboneBodyRegion(body, feature_indices)
         self.fpn = fpn
 
     def forward(self, x):
@@ -88,8 +89,8 @@ class ConvNeXtBodyFPNRegion(nn.Module):
         return tuple(self.fpn(features).values())
 
 
-class PT2EConvNeXtFPNBackbone(nn.Module):
-    """PT2E ConvNeXt graph followed by the original FP32 torchvision FPN."""
+class PT2EBackboneFPN(nn.Module):
+    """PT2E backbone graph followed by the original FP32 torchvision FPN."""
 
     def __init__(self, body_region, fpn, out_channels):
         super().__init__()
@@ -98,7 +99,7 @@ class PT2EConvNeXtFPNBackbone(nn.Module):
         self.out_channels = int(out_channels)
 
     def train(self, mode: bool = True):
-        # Exported GraphModules reject .train()/.eval(). Their ConvNeXt graph is
+        # Exported GraphModules reject .train()/.eval(). Their backbone graph is
         # captured in deterministic eval form; QAT fake-quant nodes still update
         # during forward. Only the ordinary FPN needs recursive mode switching.
         self.training = mode
@@ -136,9 +137,9 @@ def _dynamic_shapes(example_batch_size, maximum_batch_size, minimum_side, maximu
 
 
 def prepare_pt2e_backbone_qat(model, config, inplace=False):
-    """Replace only ConvNeXt body with a prepared x86 PT2E QAT graph."""
+    """Replace only backbone body with a prepared x86 PT2E QAT graph."""
     prepared_model = model if inplace else copy.deepcopy(model)
-    if isinstance(prepared_model.backbone, PT2EConvNeXtFPNBackbone):
+    if isinstance(prepared_model.backbone, PT2EBackboneFPN):
         return prepared_model
     pt2e = config.get("quantization", {}).get("pt2e", {})
     scope = str(pt2e.get("region", "backbone")).lower()
@@ -150,7 +151,10 @@ def prepare_pt2e_backbone_qat(model, config, inplace=False):
     maximum_side = int(pt2e.get("maximum_image_side", config["model"].get("max_size", 1600)))
     example_height = int(pt2e.get("example_height", min(960, maximum_side)))
     example_width = int(pt2e.get("example_width", min(1280, maximum_side)))
-    spatial_divisor = 64 if scope == "backbone_fpn" else 32
+    backbone = prepared_model.backbone
+    feature_indices = tuple(getattr(backbone, "feature_indices", (1, 3, 5, 7)))
+    default_spatial_divisor = int(getattr(backbone, "pt2e_spatial_divisor", 32))
+    spatial_divisor = 64 if scope == "backbone_fpn" else default_spatial_divisor
     if any(
         value <= 0 or value % spatial_divisor
         for value in (minimum_side, maximum_side, example_height, example_width)
@@ -161,11 +165,10 @@ def prepare_pt2e_backbone_qat(model, config, inplace=False):
     if maximum_batch < example_batch:
         raise ValueError("pt2e.maximum_batch_size must be >= example_batch_size")
 
-    backbone = prepared_model.backbone
     region = (
-        ConvNeXtBodyRegion(backbone.body)
+        BackboneBodyRegion(backbone.body, feature_indices)
         if scope == "backbone"
-        else ConvNeXtBodyFPNRegion(backbone.body, backbone.fpn)
+        else BackboneBodyFPNRegion(backbone.body, backbone.fpn, feature_indices)
     ).cpu().eval()
     example = torch.randn(example_batch, 3, example_height, example_width)
     exported = export(
@@ -188,7 +191,7 @@ def prepare_pt2e_backbone_qat(model, config, inplace=False):
             f"torch={torch.__version__}. "
             "On Kaggle, reinstall a PT2E-compatible torch first, then rerun this notebook."
         )
-    prepared_model.backbone = PT2EConvNeXtFPNBackbone(
+    prepared_model.backbone = PT2EBackboneFPN(
         prepared_region, backbone.fpn if scope == "backbone" else None, backbone.out_channels,
     )
     prepared_model.pt2e_quantized_region = (
@@ -196,7 +199,7 @@ def prepare_pt2e_backbone_qat(model, config, inplace=False):
     )
     if scope == "backbone_fpn":
         # FPN creates additional parity guards. Faster R-CNN must therefore pad
-        # its internal ImageList to 64 instead of the normal ConvNeXt stride 32.
+        # its internal ImageList to 64 instead of the default backbone stride.
         prepared_model.transform.size_divisible = 64
     return prepared_model
 
@@ -226,9 +229,9 @@ def set_pt2e_qat_phase(model, phase):
 
 
 def convert_pt2e_backbone(model, inplace=False, compile_region=False):
-    """Convert the prepared ConvNeXt graph and optionally compile that graph."""
+    """Convert the prepared backbone graph and optionally compile that graph."""
     converted_model = model if inplace else copy.deepcopy(model)
-    if not isinstance(converted_model.backbone, PT2EConvNeXtFPNBackbone):
+    if not isinstance(converted_model.backbone, PT2EBackboneFPN):
         raise TypeError("Model has not been prepared by prepare_pt2e_backbone_qat")
     _, convert_pt2e, _, _, move_to_eval = _torchao_pt2e()
     converted_model.cpu()
