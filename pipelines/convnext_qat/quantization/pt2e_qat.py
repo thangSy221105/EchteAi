@@ -126,6 +126,26 @@ class ResNet50BodyFPNRegion(nn.Module):
         return tuple(self.fpn(features).values())
 
 
+def build_backbone_body_region(backbone, scope="backbone"):
+    """Build the tensor-only PT2E export region for the selected backbone."""
+    scope = str(scope).lower()
+    if scope not in {"backbone", "backbone_fpn"}:
+        raise ValueError("scope must be backbone or backbone_fpn")
+    feature_indices = tuple(getattr(backbone, "feature_indices", (1, 3, 5, 7)))
+    region_kind = str(getattr(backbone, "pt2e_region_kind", "convnext")).lower()
+    if region_kind == "resnet50":
+        return (
+            ResNet50BodyRegion(backbone.body)
+            if scope == "backbone"
+            else ResNet50BodyFPNRegion(backbone.body, backbone.fpn)
+        )
+    return (
+        BackboneBodyRegion(backbone.body, feature_indices)
+        if scope == "backbone"
+        else BackboneBodyFPNRegion(backbone.body, backbone.fpn, feature_indices)
+    )
+
+
 class PT2EBackboneFPN(nn.Module):
     """PT2E backbone graph followed by the original FP32 torchvision FPN."""
 
@@ -189,7 +209,6 @@ def prepare_pt2e_backbone_qat(model, config, inplace=False):
     example_height = int(pt2e.get("example_height", min(960, maximum_side)))
     example_width = int(pt2e.get("example_width", min(1280, maximum_side)))
     backbone = prepared_model.backbone
-    feature_indices = tuple(getattr(backbone, "feature_indices", (1, 3, 5, 7)))
     default_spatial_divisor = int(getattr(backbone, "pt2e_spatial_divisor", 32))
     spatial_divisor = 64 if scope == "backbone_fpn" else default_spatial_divisor
     if any(
@@ -202,20 +221,7 @@ def prepare_pt2e_backbone_qat(model, config, inplace=False):
     if maximum_batch < example_batch:
         raise ValueError("pt2e.maximum_batch_size must be >= example_batch_size")
 
-    region_kind = str(getattr(backbone, "pt2e_region_kind", "convnext")).lower()
-    if region_kind == "resnet50":
-        region = (
-            ResNet50BodyRegion(backbone.body)
-            if scope == "backbone"
-            else ResNet50BodyFPNRegion(backbone.body, backbone.fpn)
-        )
-    else:
-        region = (
-            BackboneBodyRegion(backbone.body, feature_indices)
-            if scope == "backbone"
-            else BackboneBodyFPNRegion(backbone.body, backbone.fpn, feature_indices)
-        )
-    region = region.cpu().eval()
+    region = build_backbone_body_region(backbone, scope=scope).cpu().eval()
     example = torch.randn(example_batch, 3, example_height, example_width)
     exported = export(
         region,
