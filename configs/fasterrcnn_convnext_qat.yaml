@@ -58,6 +58,15 @@ quantization:
   calibration_images: 256
   weight_only_warmup_epochs: 2
   observer_freeze_epochs: 2
+  mixed_precision:
+    enabled: false
+    scope: backbone
+    candidate_weight_bits: [4, 8]
+    activation_bits: 8
+    target_average_weight_bits: 6.0
+    sensitivity_batches: 8
+    policy_path:
+    policy_output: outputs/convnext_qat/resnet50_hawq_policy.json
   pt2e:
     region: backbone
     observer_warmup_epochs: 1

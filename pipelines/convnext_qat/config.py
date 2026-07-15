@@ -22,6 +22,13 @@ def load_config(path, require_dataset=False):
     for key, value in config["output"].items():
         if isinstance(value, str) and not Path(value).is_absolute():
             config["output"][key] = str((root / value).resolve())
+    mixed_precision = config.get("quantization", {}).get("mixed_precision", {})
+    policy_path = mixed_precision.get("policy_path")
+    if policy_path and not Path(policy_path).is_absolute():
+        mixed_precision["policy_path"] = str((root / policy_path).resolve())
+    policy_output = mixed_precision.get("policy_output")
+    if policy_output and not Path(policy_output).is_absolute():
+        mixed_precision["policy_output"] = str((root / policy_output).resolve())
     if require_dataset:
         validate_dataset_paths(config)
     return config

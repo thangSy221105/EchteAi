@@ -44,36 +44,49 @@ class QuantizedOperation(nn.Module):
         return self.dequant(self.operation(self.quant(x)))
 
 
-def selective_qconfig():
+def selective_qconfig(weight_bits=8, activation_bits=8):
+    if not 2 <= int(weight_bits) <= 8:
+        raise ValueError("weight_bits must be between 2 and 8")
+    if not 2 <= int(activation_bits) <= 8:
+        raise ValueError("activation_bits must be between 2 and 8")
+    activation_quant_max = (1 << int(activation_bits)) - 1
+    weight_quant_min = -(1 << (int(weight_bits) - 1))
+    weight_quant_max = (1 << (int(weight_bits) - 1)) - 1
     return QConfig(
         activation=FakeQuantize.with_args(
             observer=MovingAverageMinMaxObserver,
             dtype=torch.quint8,
             qscheme=torch.per_tensor_affine,
             quant_min=0,
-            quant_max=255,
+            quant_max=activation_quant_max,
         ),
         weight=FakeQuantize.with_args(
             observer=PerChannelMinMaxObserver,
             dtype=torch.qint8,
             qscheme=torch.per_channel_symmetric,
-            quant_min=-128,
-            quant_max=127,
+            quant_min=weight_quant_min,
+            quant_max=weight_quant_max,
             ch_axis=0,
         ),
     )
 
 
-def _wrap_operations(module, qconfig):
+def _wrap_operations(module, default_qconfig, prefix="", module_qconfig_map=None):
     for name, child in list(module.named_children()):
+        child_name = f"{prefix}.{name}" if prefix else name
         if isinstance(child, QuantizedOperation):
             continue
         if isinstance(child, (nn.Conv2d, nn.Linear)):
+            qconfig = (
+                (module_qconfig_map or {}).get(child_name, default_qconfig)
+            )
+            if qconfig is None:
+                continue
             wrapped = QuantizedOperation(child)
             wrapped.qconfig = qconfig
             setattr(module, name, wrapped)
         else:
-            _wrap_operations(child, qconfig)
+            _wrap_operations(child, default_qconfig, prefix=child_name, module_qconfig_map=module_qconfig_map)
 
 
 def _validate_variant(variant):
@@ -87,7 +100,7 @@ def _regions_from_module_names(module_names):
     regions = set()
     for raw_name in module_names:
         name = str(raw_name).lower()
-        if name == "backbone.convnext":
+        if name in {"backbone.convnext", "backbone.resnet50", "backbone.body"}:
             regions.add("backbone")
         elif name == "backbone.fpn":
             regions.add("fpn")
@@ -104,6 +117,7 @@ def _regions_from_module_names(module_names):
 
 def prepare_selective_qat(
     model, variant="M3", backend="auto", inplace=False, quantized_modules=None,
+    module_qconfig_map=None,
 ):
     """Insert fake quant only into regions selected by M0-M4."""
     variant = _validate_variant(variant)
@@ -137,11 +151,21 @@ def prepare_selective_qat(
     qconfig = selective_qconfig()
 
     if "backbone" in regions:
-        _wrap_operations(qat_model.backbone.body, qconfig)
+        _wrap_operations(
+            qat_model.backbone.body,
+            qconfig if module_qconfig_map is None else None,
+            prefix="backbone.body",
+            module_qconfig_map=module_qconfig_map,
+        )
     if "fpn" in regions:
-        _wrap_operations(qat_model.backbone.fpn, qconfig)
+        _wrap_operations(
+            qat_model.backbone.fpn,
+            qconfig if module_qconfig_map is None else None,
+            prefix="backbone.fpn",
+            module_qconfig_map=module_qconfig_map,
+        )
     if "rpn_conv" in regions:
-        _wrap_operations(qat_model.rpn.head.conv, qconfig)
+        _wrap_operations(qat_model.rpn.head.conv, qconfig, prefix="rpn.head.conv")
     if "rpn_cls" in regions and not isinstance(qat_model.rpn.head.cls_logits, QuantizedOperation):
         wrapper = QuantizedOperation(qat_model.rpn.head.cls_logits)
         wrapper.qconfig = qconfig
@@ -158,6 +182,7 @@ def prepare_selective_qat(
     qat_model.qat_variant = variant
     qat_model.quantized_backend = backend
     qat_model.quantized_module_names = list(quantized_modules or [])
+    qat_model.mixed_precision_module_qconfigs = sorted((module_qconfig_map or {}).keys())
     return qat_model
 
 

@@ -17,7 +17,16 @@ from pipelines.convnext_qat.engine import (
 )
 from pipelines.convnext_qat.metrics import evaluate_model
 from pipelines.convnext_qat.models import build_fasterrcnn_convnext
-from pipelines.convnext_qat.quantization import convert_selective_qat, prepare_selective_qat, set_qat_phase
+from pipelines.convnext_qat.quantization import (
+    convert_selective_qat,
+    mixed_precision_policy_from_config,
+    module_qconfig_map_from_policy,
+    policy_has_non_int8_weights,
+    policy_scope_to_quantized_modules,
+    policy_summary,
+    prepare_selective_qat,
+    set_qat_phase,
+)
 
 
 def parse_args():
@@ -65,12 +74,27 @@ def main():
         config, "val", shuffle=False, limit=args.limit, batch_size=qat_batch_size,
     )
     quantized_modules = quantized_modules_for_variant(config, variant)
+    mixed_precision_policy = mixed_precision_policy_from_config(config)
+    module_qconfig_map = None
+    skip_final_convert = False
+    if mixed_precision_policy is not None:
+        quantized_modules = policy_scope_to_quantized_modules(mixed_precision_policy)
+        module_qconfig_map = module_qconfig_map_from_policy(mixed_precision_policy)
+        skip_final_convert = policy_has_non_int8_weights(mixed_precision_policy)
     print(
         f"QAT setup device={device} variant={variant} "
         f"train_images={len(train_loader.dataset)} val_images={len(val_loader.dataset)}",
         flush=True,
     )
     print(f"quantized_modules={quantized_modules}", flush=True)
+    if mixed_precision_policy is not None:
+        print(f"mixed_precision_policy={policy_summary(mixed_precision_policy)}", flush=True)
+        if skip_final_convert:
+            print(
+                "mixed-precision policy contains sub-8-bit weights; eager convert will be skipped "
+                "because the current backend does not provide true 4-bit deployment kernels.",
+                flush=True,
+            )
 
     source_checkpoint = args.fp32_checkpoint or config["output"]["fp32_best"]
     print("building FP32 model topology...", flush=True)
@@ -79,7 +103,11 @@ def main():
     load_checkpoint(source_checkpoint, fp32_model)
     print("FP32 checkpoint loaded; preparing selective QAT model...", flush=True)
     qat_model = prepare_selective_qat(
-        fp32_model, variant, backend, quantized_modules=quantized_modules
+        fp32_model,
+        variant,
+        backend,
+        quantized_modules=quantized_modules,
+        module_qconfig_map=module_qconfig_map,
     ).to(device)
     backend = qat_model.quantized_backend
     print("selective QAT model prepared and moved to device", flush=True)
@@ -137,7 +165,14 @@ def main():
         save_checkpoint(
             config["output"]["qat_last"], qat_model, optimizer, epoch + 1,
             {"train": train_metrics, "validation_pending": True},
-            {"variant": variant, "backend": backend, "format": "prepared_qat", "quantized_modules": quantized_modules or [], "best_map": best_map},
+            {
+                "variant": variant,
+                "backend": backend,
+                "format": "prepared_qat",
+                "quantized_modules": quantized_modules or [],
+                "best_map": best_map,
+                "mixed_precision_policy": mixed_precision_policy,
+            },
         )
         print(f"saved pre-validation QAT checkpoint: {config['output']['qat_last']}", flush=True)
         print("QAT validation started", flush=True)
@@ -170,13 +205,27 @@ def main():
             save_checkpoint(
                 config["output"]["qat_best"], qat_model, optimizer, epoch + 1,
                 {**val_metrics, "benchmark": benchmark_metrics},
-                {"variant": variant, "backend": backend, "format": "prepared_qat", "quantized_modules": quantized_modules or [], "best_map": best_map},
+                {
+                    "variant": variant,
+                    "backend": backend,
+                    "format": "prepared_qat",
+                    "quantized_modules": quantized_modules or [],
+                    "best_map": best_map,
+                    "mixed_precision_policy": mixed_precision_policy,
+                },
             )
             print(f"saved new QAT best: {config['output']['qat_best']}", flush=True)
         save_checkpoint(
             config["output"]["qat_last"], qat_model, optimizer, epoch + 1,
             {**val_metrics, "benchmark": benchmark_metrics},
-            {"variant": variant, "backend": backend, "format": "prepared_qat", "quantized_modules": quantized_modules or [], "best_map": best_map},
+            {
+                "variant": variant,
+                "backend": backend,
+                "format": "prepared_qat",
+                "quantized_modules": quantized_modules or [],
+                "best_map": best_map,
+                "mixed_precision_policy": mixed_precision_policy,
+            },
         )
         print(f"saved QAT resume checkpoint: {config['output']['qat_last']}", flush=True)
     print(
@@ -188,12 +237,25 @@ def main():
         return
     if not best_saved:
         raise ValueError("QAT schedule has no frozen-observer epoch eligible for best checkpoint selection")
+    if skip_final_convert:
+        print(
+            "Skipping eager INT8 conversion: mixed-precision policy includes sub-8-bit weights. "
+            "Use the prepared QAT checkpoint for fake-quant analysis or export to a real low-bit backend.",
+            flush=True,
+        )
+        return
     load_checkpoint(config["output"]["qat_best"], qat_model)
     int8_model = convert_selective_qat(qat_model.to("cpu"))
     save_checkpoint(
         config["output"]["int8_model"], int8_model,
         metrics={"best_qat_map_50_95": best_map},
-        extra={"variant": variant, "backend": backend, "format": "selective_int8", "quantized_modules": quantized_modules or []},
+        extra={
+            "variant": variant,
+            "backend": backend,
+            "format": "selective_int8",
+            "quantized_modules": quantized_modules or [],
+            "mixed_precision_policy": mixed_precision_policy,
+        },
     )
     print(f"Converted selective INT8 checkpoint: {config['output']['int8_model']}")
 
