@@ -98,6 +98,17 @@ class ResNet50BodyRegion(nn.Module):
         return (c2.clone(), c3.clone(), c4.clone(), c5.clone())
 
 
+class SingleTensorRegion(nn.Module):
+    """Export a single module with one tensor input and one tensor output."""
+
+    def __init__(self, module):
+        super().__init__()
+        self.module = module
+
+    def forward(self, x):
+        return self.module(x)
+
+
 class BackboneBodyFPNRegion(nn.Module):
     """Optional second PT2E scope covering the backbone body and the complete FPN."""
 
@@ -170,6 +181,30 @@ class PT2EBackboneFPN(nn.Module):
         return self.fpn(features) if self.fpn is not None else features
 
 
+class PT2EResNetBodyStages(nn.Module):
+    """Stage-wise PT2E wrapper for ResNet50 to avoid multi-output partition issues."""
+
+    def __init__(self, stem, layer1, layer2, layer3, layer4):
+        super().__init__()
+        self.stem = stem
+        self.layer1 = layer1
+        self.layer2 = layer2
+        self.layer3 = layer3
+        self.layer4 = layer4
+
+    def train(self, mode: bool = True):
+        self.training = mode
+        return self
+
+    def forward(self, x):
+        x = self.stem(x)
+        c2 = self.layer1(x)
+        c3 = self.layer2(c2)
+        c4 = self.layer3(c3)
+        c5 = self.layer4(c4)
+        return (c2, c3, c4, c5)
+
+
 def _dynamic_shapes(example_batch_size, maximum_batch_size, minimum_side, maximum_side,
                     spatial_divisor=32):
     # ConvNeXt downsamples by 32. Expressing this relation explicitly avoids
@@ -193,6 +228,72 @@ def _dynamic_shapes(example_batch_size, maximum_batch_size, minimum_side, maximu
     return ({0: batch, 2: height, 3: width},)
 
 
+def _export_single_region(region, example, example_batch, maximum_batch,
+                          minimum_side, maximum_side, spatial_divisor):
+    return export(
+        region,
+        (example,),
+        dynamic_shapes=_dynamic_shapes(
+            example_batch, maximum_batch, minimum_side, maximum_side, spatial_divisor,
+        ),
+    ).module()
+
+
+def _prepare_resnet50_stagewise_qat(backbone, config):
+    pt2e = config.get("quantization", {}).get("pt2e", {})
+    example_batch = int(pt2e.get("example_batch_size", 1))
+    maximum_batch = int(pt2e.get("maximum_batch_size", config["training"].get("qat_batch_size", 1)))
+    minimum_side = int(pt2e.get("minimum_image_side", 256))
+    maximum_side = int(pt2e.get("maximum_image_side", config["model"].get("max_size", 1600)))
+    example_height = int(pt2e.get("example_height", min(960, maximum_side)))
+    example_width = int(pt2e.get("example_width", min(1280, maximum_side)))
+
+    prepare_qat_pt2e, _, quantizer_type, xiq, _ = _torchao_pt2e()
+
+    def make_quantizer():
+        quantizer = quantizer_type()
+        quantizer.set_global(xiq.get_default_x86_inductor_quantization_config(is_qat=True))
+        return quantizer
+
+    def prepare_stage(module, channels, input_divisor):
+        if any(value <= 0 or value % input_divisor for value in (minimum_side, maximum_side, example_height, example_width)):
+            raise ValueError(
+                f"PT2E ResNet50 stage input dimensions must be positive multiples of {input_divisor}"
+            )
+        example = torch.randn(
+            example_batch,
+            channels,
+            example_height // input_divisor,
+            example_width // input_divisor,
+        )
+        exported = _export_single_region(
+            SingleTensorRegion(module).cpu().eval(),
+            example,
+            example_batch,
+            maximum_batch,
+            minimum_side // input_divisor,
+            maximum_side // input_divisor,
+            1,
+        )
+        prepared = prepare_qat_pt2e(exported, make_quantizer())
+        fake_quantizers = _collect_pt2e_fake_quantizers(prepared)
+        if not fake_quantizers:
+            raise RuntimeError(
+                "prepare_qat_pt2e completed but inserted no PT2E fake-quant modules for a ResNet50 stage. "
+                f"torch={torch.__version__}. Check torch/torchao compatibility."
+            )
+        return prepared
+
+    prepared_stem = prepare_stage(backbone.body[0], 3, 1)
+    prepared_layer1 = prepare_stage(backbone.body[1], 64, 4)
+    prepared_layer2 = prepare_stage(backbone.body[2], 256, 4)
+    prepared_layer3 = prepare_stage(backbone.body[3], 512, 8)
+    prepared_layer4 = prepare_stage(backbone.body[4], 1024, 16)
+    return PT2EResNetBodyStages(
+        prepared_stem, prepared_layer1, prepared_layer2, prepared_layer3, prepared_layer4,
+    )
+
+
 def prepare_pt2e_backbone_qat(model, config, inplace=False):
     """Replace only backbone body with a prepared x86 PT2E QAT graph."""
     prepared_model = model if inplace else copy.deepcopy(model)
@@ -209,6 +310,13 @@ def prepare_pt2e_backbone_qat(model, config, inplace=False):
     example_height = int(pt2e.get("example_height", min(960, maximum_side)))
     example_width = int(pt2e.get("example_width", min(1280, maximum_side)))
     backbone = prepared_model.backbone
+    if str(getattr(backbone, "pt2e_region_kind", "convnext")).lower() == "resnet50":
+        if scope != "backbone":
+            raise ValueError("ResNet50 PT2E currently supports only quantization.pt2e.region=backbone")
+        prepared_region = _prepare_resnet50_stagewise_qat(backbone, config)
+        prepared_model.backbone = PT2EBackboneFPN(prepared_region, backbone.fpn, backbone.out_channels)
+        prepared_model.pt2e_quantized_region = "backbone.body(stagewise)"
+        return prepared_model
     default_spatial_divisor = int(getattr(backbone, "pt2e_spatial_divisor", 32))
     spatial_divisor = 64 if scope == "backbone_fpn" else default_spatial_divisor
     if any(
@@ -287,8 +395,16 @@ def convert_pt2e_backbone(model, inplace=False, compile_region=False):
         raise TypeError("Model has not been prepared by prepare_pt2e_backbone_qat")
     _, convert_pt2e, _, _, move_to_eval = _torchao_pt2e()
     converted_model.cpu()
-    converted_region = convert_pt2e(converted_model.backbone.body_region)
-    move_to_eval(converted_region)
+    body_region = converted_model.backbone.body_region
+    if isinstance(body_region, PT2EResNetBodyStages):
+        for name in ("stem", "layer1", "layer2", "layer3", "layer4"):
+            converted_stage = convert_pt2e(getattr(body_region, name))
+            move_to_eval(converted_stage)
+            setattr(body_region, name, converted_stage)
+        converted_region = body_region
+    else:
+        converted_region = convert_pt2e(body_region)
+        move_to_eval(converted_region)
     converted_model.backbone.body_region = converted_region
     converted_model.eval()
     converted_model.pt2e_compiled = False
