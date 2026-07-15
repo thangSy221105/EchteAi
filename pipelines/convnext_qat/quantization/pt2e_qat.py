@@ -205,6 +205,36 @@ class PT2EResNetBodyStages(nn.Module):
         return (c2, c3, c4, c5)
 
 
+class PT2EResNetBodyBlocks(nn.Module):
+    """Block-wise PT2E wrapper for ResNet50 to shrink quantizer partitions."""
+
+    def __init__(self, stem, layer1, layer2, layer3, layer4):
+        super().__init__()
+        self.stem = stem
+        self.layer1 = nn.ModuleList(layer1)
+        self.layer2 = nn.ModuleList(layer2)
+        self.layer3 = nn.ModuleList(layer3)
+        self.layer4 = nn.ModuleList(layer4)
+
+    def train(self, mode: bool = True):
+        self.training = mode
+        return self
+
+    @staticmethod
+    def _forward_stage(blocks, x):
+        for block in blocks:
+            x = block(x)
+        return x
+
+    def forward(self, x):
+        x = self.stem(x)
+        c2 = self._forward_stage(self.layer1, x)
+        c3 = self._forward_stage(self.layer2, c2)
+        c4 = self._forward_stage(self.layer3, c3)
+        c5 = self._forward_stage(self.layer4, c4)
+        return (c2, c3, c4, c5)
+
+
 def _dynamic_shapes(example_batch_size, maximum_batch_size, minimum_side, maximum_side,
                     spatial_divisor=32):
     # ConvNeXt downsamples by 32. Expressing this relation explicitly avoids
@@ -285,12 +315,29 @@ def _prepare_resnet50_stagewise_qat(backbone, config):
             )
         return prepared
 
+    def prepare_stage_blocks(stage, channels, input_divisor):
+        prepared_blocks = []
+        current_channels = channels
+        current_divisor = input_divisor
+        for block_index, block in enumerate(stage):
+            prepared_blocks.append(prepare_stage(block, current_channels, current_divisor))
+            # After the first block in a stage, the remaining blocks consume the
+            # stage output width/channels.
+            if block_index == 0:
+                out_channels = getattr(block, "bn3", None)
+                if out_channels is not None:
+                    current_channels = int(block.bn3.num_features)
+                stride = getattr(getattr(block, "conv2", None), "stride", (1, 1))
+                stride_value = int(stride[0]) if isinstance(stride, tuple) else int(stride)
+                current_divisor *= max(stride_value, 1)
+        return prepared_blocks
+
     prepared_stem = prepare_stage(backbone.body[0], 3, 1)
-    prepared_layer1 = prepare_stage(backbone.body[1], 64, 4)
-    prepared_layer2 = prepare_stage(backbone.body[2], 256, 4)
-    prepared_layer3 = prepare_stage(backbone.body[3], 512, 8)
-    prepared_layer4 = prepare_stage(backbone.body[4], 1024, 16)
-    return PT2EResNetBodyStages(
+    prepared_layer1 = prepare_stage_blocks(backbone.body[1], 64, 4)
+    prepared_layer2 = prepare_stage_blocks(backbone.body[2], 256, 4)
+    prepared_layer3 = prepare_stage_blocks(backbone.body[3], 512, 8)
+    prepared_layer4 = prepare_stage_blocks(backbone.body[4], 1024, 16)
+    return PT2EResNetBodyBlocks(
         prepared_stem, prepared_layer1, prepared_layer2, prepared_layer3, prepared_layer4,
     )
 
@@ -397,7 +444,19 @@ def convert_pt2e_backbone(model, inplace=False, compile_region=False):
     _, convert_pt2e, _, _, move_to_eval = _torchao_pt2e()
     converted_model.cpu()
     body_region = converted_model.backbone.body_region
-    if isinstance(body_region, PT2EResNetBodyStages):
+    if isinstance(body_region, PT2EResNetBodyBlocks):
+        converted_stem = convert_pt2e(body_region.stem)
+        move_to_eval(converted_stem)
+        body_region.stem = converted_stem
+        for stage_name in ("layer1", "layer2", "layer3", "layer4"):
+            converted_blocks = []
+            for block in getattr(body_region, stage_name):
+                converted_block = convert_pt2e(block)
+                move_to_eval(converted_block)
+                converted_blocks.append(converted_block)
+            setattr(body_region, stage_name, nn.ModuleList(converted_blocks))
+        converted_region = body_region
+    elif isinstance(body_region, PT2EResNetBodyStages):
         for name in ("stem", "layer1", "layer2", "layer3", "layer4"):
             converted_stage = convert_pt2e(getattr(body_region, name))
             move_to_eval(converted_stage)
