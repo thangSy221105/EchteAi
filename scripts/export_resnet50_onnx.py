@@ -23,7 +23,7 @@ import torch
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from pipelines.convnext_qat.checkpoint import load_checkpoint
+from pipelines.convnext_qat.checkpoint import load_checkpoint, load_partial_checkpoint
 from pipelines.convnext_qat.compiler import build_compiler_target_module, resolve_compiler_scope
 from pipelines.convnext_qat.config import load_config, quantized_modules_for_variant
 from pipelines.convnext_qat.models import build_fasterrcnn_convnext
@@ -42,6 +42,7 @@ def parse_args():
     parser.add_argument("--model", choices=["fp32", "qat_graph"], default="fp32")
     parser.add_argument("--fp32-checkpoint")
     parser.add_argument("--qat-checkpoint")
+    parser.add_argument("--partial-fp32-checkpoint", action="store_true")
     parser.add_argument("--output")
     parser.add_argument("--artifact-dir")
     parser.add_argument("--opset", type=int, default=17)
@@ -89,13 +90,31 @@ def normalize_qdq_zero_points_for_tensorrt(onnx_path: Path):
     return touched
 
 
-def load_source_model(config, model_kind, fp32_checkpoint=None, qat_checkpoint=None, force_w8a8=False):
+def load_source_model(
+    config,
+    model_kind,
+    fp32_checkpoint=None,
+    qat_checkpoint=None,
+    force_w8a8=False,
+    partial_fp32_checkpoint=False,
+):
     model = build_fasterrcnn_convnext(config).cpu().eval()
     if model_kind == "fp32":
         checkpoint = fp32_checkpoint or config["output"].get("fp32_best")
         if checkpoint and Path(checkpoint).is_file():
             print(f"Loading FP32 checkpoint: {checkpoint}", flush=True)
-            payload = load_checkpoint(checkpoint, model, map_location="cpu", strict=True)
+            if partial_fp32_checkpoint:
+                payload = load_partial_checkpoint(checkpoint, model, map_location="cpu")
+                print(
+                    "Partial FP32 load summary: "
+                    f"matched={payload.get('extra', {}).get('matched_key_count', 0)} "
+                    f"missing={payload.get('extra', {}).get('missing_key_count', 0)} "
+                    f"unexpected={payload.get('extra', {}).get('unexpected_key_count', 0)} "
+                    f"shape_mismatches={payload.get('extra', {}).get('shape_mismatch_count', 0)}",
+                    flush=True,
+                )
+            else:
+                payload = load_checkpoint(checkpoint, model, map_location="cpu", strict=True)
         else:
             print("No FP32 checkpoint loaded; exporting current model weights.", flush=True)
             payload = {}
@@ -151,6 +170,7 @@ def main():
         fp32_checkpoint=args.fp32_checkpoint,
         qat_checkpoint=args.qat_checkpoint,
         force_w8a8=args.force_w8a8,
+        partial_fp32_checkpoint=args.partial_fp32_checkpoint,
     )
     target_module = build_compiler_target_module(model, config).cpu().eval()
     sample = torch.randn(batch_size, 3, height, width)

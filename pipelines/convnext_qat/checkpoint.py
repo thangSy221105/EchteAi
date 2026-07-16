@@ -51,6 +51,39 @@ def _load_model_state(model, state_dict, strict=True):
         return {"remapped_legacy_resnet50": True, "remapped_keys": int(changed)}
 
 
+def _extract_state_dict(payload):
+    if not isinstance(payload, dict):
+        return payload
+    for key in ("model", "model_state_dict", "state_dict"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            return value
+    return payload
+
+
+def _filter_matching_state_dict(model, state_dict):
+    model_state = model.state_dict()
+    matched = {}
+    unexpected = []
+    shape_mismatches = []
+    for key, value in state_dict.items():
+        if key not in model_state:
+            unexpected.append(key)
+            continue
+        if tuple(model_state[key].shape) != tuple(value.shape):
+            shape_mismatches.append(
+                {
+                    "key": key,
+                    "checkpoint_shape": tuple(value.shape),
+                    "model_shape": tuple(model_state[key].shape),
+                }
+            )
+            continue
+        matched[key] = value
+    missing = [key for key in model_state.keys() if key not in matched]
+    return matched, missing, unexpected, shape_mismatches
+
+
 def save_checkpoint(path, model, optimizer=None, epoch=0, metrics=None, extra=None, scheduler=None):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -81,6 +114,42 @@ def load_checkpoint(path, model, optimizer=None, map_location="cpu", strict=True
     if optimizer is not None and "optimizer" in payload:
         optimizer.load_state_dict(payload["optimizer"])
     if scheduler is not None and "scheduler" in payload:
+        scheduler.load_state_dict(payload["scheduler"])
+    return payload
+
+
+def load_partial_checkpoint(path, model, map_location="cpu", scheduler=None, optimizer=None):
+    """Load only keys that match by name and shape; report the rest.
+
+    Useful for reusing a backbone checkpoint when detection heads or class
+    counts do not match the current experiment.
+    """
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Checkpoint not found: {path}")
+    payload = torch.load(path, map_location=map_location, weights_only=False)
+    state_dict = _extract_state_dict(payload)
+    remapped_state_dict, changed = _remap_legacy_resnet50_backbone_keys(state_dict)
+    matched, missing, unexpected, shape_mismatches = _filter_matching_state_dict(model, remapped_state_dict)
+    model.load_state_dict(matched, strict=False)
+    info = {
+        "partial_load": True,
+        "remapped_legacy_resnet50": bool(changed > 0),
+        "remapped_keys": int(changed),
+        "matched_key_count": int(len(matched)),
+        "missing_key_count": int(len(missing)),
+        "unexpected_key_count": int(len(unexpected)),
+        "shape_mismatch_count": int(len(shape_mismatches)),
+        "missing_keys_preview": missing[:20],
+        "unexpected_keys_preview": unexpected[:20],
+        "shape_mismatches_preview": shape_mismatches[:20],
+    }
+    if isinstance(payload, dict):
+        payload.setdefault("extra", {})
+        payload["extra"].update(info)
+    if optimizer is not None and isinstance(payload, dict) and "optimizer" in payload:
+        optimizer.load_state_dict(payload["optimizer"])
+    if scheduler is not None and isinstance(payload, dict) and "scheduler" in payload:
         scheduler.load_state_dict(payload["scheduler"])
     return payload
 
