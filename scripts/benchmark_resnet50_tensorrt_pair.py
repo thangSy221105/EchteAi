@@ -46,11 +46,12 @@ def load_engine(trt, engine_path):
     engine = runtime.deserialize_cuda_engine(Path(engine_path).read_bytes())
     if engine is None:
         raise RuntimeError(f"Failed to deserialize TensorRT engine: {engine_path}")
-    return engine
+    return runtime, engine
 
 
 def create_execution(engine, input_name, shape, cuda):
     context = engine.create_execution_context()
+    stream = cuda.Stream()
     if hasattr(context, "set_input_shape"):
         context.set_input_shape(input_name, shape)
     else:
@@ -75,6 +76,7 @@ def create_execution(engine, input_name, shape, cuda):
         bindings[input_name] = int(d_input)
         return {
             "context": context,
+            "stream": stream,
             "host_input": host_input,
             "d_input": d_input,
             "output_buffers": output_buffers,
@@ -99,6 +101,7 @@ def create_execution(engine, input_name, shape, cuda):
         output_buffers[binding_index] = (host_out, d_out)
     return {
         "context": context,
+        "stream": stream,
         "host_input": host_input,
         "d_input": d_input,
         "output_buffers": output_buffers,
@@ -109,19 +112,21 @@ def create_execution(engine, input_name, shape, cuda):
 
 
 def run_once(state, input_name, cuda):
-    cuda.memcpy_htod(state["d_input"], state["host_input"])
+    stream = state["stream"]
+    cuda.memcpy_htod_async(state["d_input"], state["host_input"], stream)
     if state["tensor_api"]:
         for name, ptr in state["bindings"].items():
             state["context"].set_tensor_address(name, ptr)
-        ok = state["context"].execute_async_v3(0)
+        ok = state["context"].execute_async_v3(stream.handle)
     else:
-        ok = state["context"].execute_v2(state["bindings"])
+        ok = state["context"].execute_async_v2(state["bindings"], stream.handle)
     if not ok:
         raise RuntimeError("TensorRT execution failed.")
+    stream.synchronize()
 
 
 def benchmark(engine_path, input_name, shape, warmup_iters, iters, trt, cuda):
-    engine = load_engine(trt, engine_path)
+    runtime, engine = load_engine(trt, engine_path)
     state = create_execution(engine, input_name, shape, cuda)
     for _ in range(warmup_iters):
         run_once(state, input_name, cuda)
