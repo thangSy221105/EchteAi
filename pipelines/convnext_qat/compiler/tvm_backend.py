@@ -240,12 +240,28 @@ def _make_tvm_array(tvm, sample):
 def run_tvm_module(module, input_name, sample):
     runtime = import_tvm()
     tvm = runtime["tvm"]
-    array = _make_tvm_array(tvm, sample)
 
     if runtime["mode"] == "relay" or hasattr(module, "set_input"):
+        array = _make_tvm_array(tvm, sample)
         module.set_input(str(input_name), array)
         module.run()
         return [module.get_output(index) for index in range(module.get_num_outputs())]
 
-    result = module["main"](array)
-    return _flatten_relax_outputs(result)
+    sample_cpu = sample.detach().cpu().contiguous()
+    sample_np = sample_cpu.numpy()
+    attempts = [
+        lambda: module["main"](sample_np),
+        lambda: module["main"](sample_cpu),
+        lambda: module["main"](_make_tvm_array(tvm, sample_cpu)),
+    ]
+    last_error = None
+    for attempt in attempts:
+        try:
+            result = attempt()
+            return _flatten_relax_outputs(result)
+        except Exception as error:
+            last_error = error
+
+    raise RuntimeError(
+        "Failed to feed inputs into the Relax VM runtime using numpy, torch tensor, and TVM NDArray fallbacks."
+    ) from last_error
