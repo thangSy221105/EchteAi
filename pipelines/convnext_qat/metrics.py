@@ -214,9 +214,10 @@ def evaluate_model(model, loader, device, include_rpn=True, progress_frequency=1
     print("evaluation inference completed; calculating detection metrics", flush=True)
     metrics = native_detection_metrics(predictions, targets)
     dataset = unwrap_coco_dataset(loader.dataset)
-    canonical = _coco_metrics(predictions, targets, dataset)
-    if canonical:
-        metrics.update(canonical)
+    if not bool(getattr(dataset, "binary_collapse_foreground", False)):
+        canonical = _coco_metrics(predictions, targets, dataset)
+        if canonical:
+            metrics.update(canonical)
     if include_rpn:
         print("RPN metric evaluation started", flush=True)
         metrics.update(rpn_recall(model, loader, device))
