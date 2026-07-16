@@ -39,9 +39,10 @@ from pipelines.convnext_qat.quantization import (
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/seadronessee_resnet50_hawq_compiler.yaml")
-    parser.add_argument("--model", choices=["fp32", "int8"], default="fp32")
+    parser.add_argument("--model", choices=["fp32", "int8", "qat_graph"], default="fp32")
     parser.add_argument("--fp32-checkpoint")
     parser.add_argument("--int8-checkpoint")
+    parser.add_argument("--qat-checkpoint")
     parser.add_argument("--artifact-dir")
     parser.add_argument("--force-w8a8", action="store_true")
     parser.add_argument("--target", default="llvm")
@@ -50,7 +51,14 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_model_for_compile(config, model_kind, fp32_checkpoint=None, int8_checkpoint=None, force_w8a8=False):
+def load_model_for_compile(
+    config,
+    model_kind,
+    fp32_checkpoint=None,
+    int8_checkpoint=None,
+    qat_checkpoint=None,
+    force_w8a8=False,
+):
     model = build_fasterrcnn_convnext(config).cpu().eval()
     compiler_cfg = config.get("quantization", {}).get("compiler", {})
     if model_kind == "fp32":
@@ -62,6 +70,36 @@ def load_model_for_compile(config, model_kind, fp32_checkpoint=None, int8_checkp
             payload = {}
             print("No FP32 checkpoint loaded; compiling current model weights.", flush=True)
         return model, payload
+
+    if model_kind == "qat_graph":
+        checkpoint = qat_checkpoint or config["output"].get("qat_best") or config["output"].get("qat_last")
+        if not checkpoint or not Path(checkpoint).is_file():
+            raise FileNotFoundError("QAT graph compile requires --qat-checkpoint or output.qat_best/output.qat_last")
+        print(f"Loading QAT graph checkpoint: {checkpoint}", flush=True)
+        raw_payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+        metadata = raw_payload.get("extra", {}) if isinstance(raw_payload, dict) else {}
+        variant = str(metadata.get("variant", config["quantization"].get("variant", "M3"))).upper()
+        backend = metadata.get("backend", config["quantization"].get("backend", "x86"))
+        quantized_modules = metadata.get(
+            "quantized_modules",
+            quantized_modules_for_variant(config, variant),
+        )
+        mixed_precision_policy = None if force_w8a8 else (metadata.get("mixed_precision_policy") or mixed_precision_policy_from_config(config))
+        module_qconfig_map = None
+        if mixed_precision_policy is not None:
+            quantized_modules = policy_scope_to_quantized_modules(mixed_precision_policy)
+            module_qconfig_map = module_qconfig_map_from_policy(mixed_precision_policy)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="must run observer before calling calculate_qparams")
+            model = prepare_selective_qat(
+                model,
+                variant,
+                backend,
+                quantized_modules=quantized_modules,
+                module_qconfig_map=module_qconfig_map,
+            )
+        payload = load_checkpoint(checkpoint, model, map_location="cpu", strict=True)
+        return model.cpu().eval(), payload
 
     checkpoint = int8_checkpoint or compiler_cfg.get("int8_reference_checkpoint")
     if not checkpoint or not Path(checkpoint).is_file():
@@ -121,6 +159,7 @@ def main():
         args.model,
         fp32_checkpoint=args.fp32_checkpoint,
         int8_checkpoint=args.int8_checkpoint,
+        qat_checkpoint=args.qat_checkpoint,
         force_w8a8=args.force_w8a8,
     )
     target_module = build_compiler_target_module(model, config).cpu().eval()

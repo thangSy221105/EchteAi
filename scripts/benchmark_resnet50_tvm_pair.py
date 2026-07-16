@@ -21,8 +21,9 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fp32-lib", required=True)
     parser.add_argument("--fp32-metadata", required=True)
-    parser.add_argument("--int8-lib", required=True)
-    parser.add_argument("--int8-metadata", required=True)
+    parser.add_argument("--other-lib", required=True)
+    parser.add_argument("--other-metadata", required=True)
+    parser.add_argument("--other-label", default="other")
     parser.add_argument("--warmup-iters", type=int, default=10)
     parser.add_argument("--iters", type=int, default=50)
     parser.add_argument("--output")
@@ -58,11 +59,11 @@ def run_one(lib_path, metadata_path, warmup_iters, iters):
 def main():
     args = parse_args()
     fp32 = run_one(args.fp32_lib, args.fp32_metadata, args.warmup_iters, args.iters)
-    int8 = run_one(args.int8_lib, args.int8_metadata, args.warmup_iters, args.iters)
+    other = run_one(args.other_lib, args.other_metadata, args.warmup_iters, args.iters)
     result = {
         "fp32": fp32,
-        "int8": int8,
-        "speedup_int8_vs_fp32": fp32["tvm_runtime"]["avg_ms"] / int8["tvm_runtime"]["avg_ms"],
+        str(args.other_label): other,
+        f"speedup_{args.other_label}_vs_fp32": fp32["tvm_runtime"]["avg_ms"] / other["tvm_runtime"]["avg_ms"],
     }
     print(json.dumps(result, indent=2), flush=True)
     if args.output:

@@ -40,9 +40,10 @@ def parse_args():
     parser.add_argument("--config", default="configs/seadronessee_colab.yaml")
     parser.add_argument("--fp32-checkpoint")
     parser.add_argument("--int8-checkpoint")
+    parser.add_argument("--qat-checkpoint")
     parser.add_argument("--artifact-dir")
     parser.add_argument("--force-w8a8", action="store_true")
-    parser.add_argument("--model", choices=["fp32", "int8"], default="fp32")
+    parser.add_argument("--model", choices=["fp32", "int8", "qat_graph"], default="fp32")
     parser.add_argument("--format", choices=["torch_export", "state_dict"], default="torch_export")
     return parser.parse_args()
 
@@ -73,6 +74,34 @@ def main():
             payload = load_checkpoint(checkpoint, model, map_location="cpu", strict=True)
         else:
             print("No FP32 checkpoint loaded; exporting current model weights.", flush=True)
+    elif args.model == "qat_graph":
+        checkpoint = args.qat_checkpoint or config["output"].get("qat_best") or config["output"].get("qat_last")
+        if not checkpoint or not Path(checkpoint).is_file():
+            raise FileNotFoundError("QAT graph export requires --qat-checkpoint or output.qat_best/output.qat_last")
+        print(f"Loading QAT graph checkpoint: {checkpoint}", flush=True)
+        raw_payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+        metadata = raw_payload.get("extra", {}) if isinstance(raw_payload, dict) else {}
+        variant = str(metadata.get("variant", config["quantization"].get("variant", "M3"))).upper()
+        backend = metadata.get("backend", config["quantization"].get("backend", "x86"))
+        quantized_modules = metadata.get(
+            "quantized_modules",
+            quantized_modules_for_variant(config, variant),
+        )
+        mixed_precision_policy = None if args.force_w8a8 else (metadata.get("mixed_precision_policy") or mixed_precision_policy_from_config(config))
+        module_qconfig_map = None
+        if mixed_precision_policy is not None:
+            quantized_modules = policy_scope_to_quantized_modules(mixed_precision_policy)
+            module_qconfig_map = module_qconfig_map_from_policy(mixed_precision_policy)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="must run observer before calling calculate_qparams")
+            model = prepare_selective_qat(
+                model,
+                variant,
+                backend,
+                quantized_modules=quantized_modules,
+                module_qconfig_map=module_qconfig_map,
+            )
+        payload = load_checkpoint(checkpoint, model, map_location="cpu", strict=True)
     else:
         checkpoint = args.int8_checkpoint or compiler_cfg.get("int8_reference_checkpoint")
         if not checkpoint or not Path(checkpoint).is_file():
@@ -133,14 +162,14 @@ def main():
 
     if args.format == "torch_export":
         exported = torch.export.export(target, (sample,))
-        artifact_path = artifact_dir / f"resnet50_{scope}.pt2"
+        artifact_path = artifact_dir / f"resnet50_{scope}_{args.model}.pt2"
         torch.export.save(exported, artifact_path)
     else:
-        suffix = "int8" if args.model == "int8" else "fp32"
+        suffix = args.model
         artifact_path = artifact_dir / f"resnet50_{scope}_{suffix}_state_dict.pt"
         torch.save(target.state_dict(), artifact_path)
 
-    metadata_suffix = "int8" if args.model == "int8" else "fp32"
+    metadata_suffix = args.model
     metadata_path = artifact_dir / f"resnet50_{scope}_{metadata_suffix}_metadata.json"
     metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
