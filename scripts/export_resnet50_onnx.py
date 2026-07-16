@@ -32,6 +32,7 @@ from pipelines.convnext_qat.quantization import (
     module_qconfig_map_from_policy,
     policy_scope_to_quantized_modules,
     prepare_selective_qat,
+    set_qat_phase,
 )
 
 
@@ -84,6 +85,7 @@ def load_source_model(config, model_kind, fp32_checkpoint=None, qat_checkpoint=N
             module_qconfig_map=module_qconfig_map,
         )
     payload = load_checkpoint(checkpoint, model, map_location="cpu", strict=True)
+    set_qat_phase(model, "frozen")
     return model.cpu().eval(), payload
 
 
@@ -119,15 +121,27 @@ def main():
     onnx_path = Path(args.output) if args.output else artifact_dir / f"resnet50_{scope}_{args.model}.onnx"
     metadata_path = onnx_path.with_name(f"{onnx_path.stem}_metadata.json")
 
-    torch.onnx.export(
-        target_module,
-        (sample,),
-        str(onnx_path),
+    export_kwargs = dict(
         input_names=["input0"],
         output_names=output_names,
         opset_version=int(args.opset),
         do_constant_folding=True,
     )
+    if args.model == "qat_graph":
+        torch.onnx.export(
+            target_module,
+            (sample,),
+            str(onnx_path),
+            dynamo=False,
+            **export_kwargs,
+        )
+    else:
+        torch.onnx.export(
+            target_module,
+            (sample,),
+            str(onnx_path),
+            **export_kwargs,
+        )
 
     metadata = {
         "model_kind": args.model,
