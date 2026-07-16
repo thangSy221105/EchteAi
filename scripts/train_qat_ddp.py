@@ -58,8 +58,14 @@ def parse_args():
     parser.add_argument("--fp32-checkpoint", help="override output.fp32_best")
     parser.add_argument("--variant", choices=["M0", "M1", "M2", "M3", "M4"])
     parser.add_argument("--limit", type=int)
+    parser.add_argument(
+        "--per-gpu-batch-size",
+        type=int,
+        help="override training.qat_batch_size with an explicit per-GPU batch size",
+    )
     parser.add_argument("--resume", help="resume a prepared-QAT checkpoint")
     parser.add_argument("--epochs-this-run", type=int, help="stop after this many epochs")
+    parser.add_argument("--max-steps", type=int, help="cap training steps per epoch for a fast smoke test")
     parser.add_argument(
         "--no-find-unused-parameters",
         action="store_true",
@@ -106,12 +112,14 @@ def build_distributed_loader(config, split, rank, world_size, limit=None, batch_
         augmentation={
             **(config.get("augmentation", {}) if split == "train" else {}),
             "ignore_category_ids": dataset_cfg.get("ignore_category_ids", []),
+            "binary_collapse_foreground": dataset_cfg.get("binary_collapse_foreground", False),
         },
     )
-    if int(dataset_cfg["num_classes"]) != len(dataset.category_id_to_label) + 1:
+    expected_num_classes = 2 if bool(dataset_cfg.get("binary_collapse_foreground", False)) else len(dataset.category_id_to_label) + 1
+    if int(dataset_cfg["num_classes"]) != expected_num_classes:
         raise ValueError(
             f"dataset.num_classes={dataset_cfg['num_classes']} but {split} annotations "
-            f"contain {len(dataset.category_id_to_label)} foreground categories"
+            f"contain {1 if bool(dataset_cfg.get('binary_collapse_foreground', False)) else len(dataset.category_id_to_label)} foreground categories"
         )
     if limit is not None:
         dataset = Subset(dataset, range(min(int(limit), len(dataset))))
@@ -162,6 +170,7 @@ def train_one_epoch_ddp(
     rank,
     grad_clip_norm=0.0,
     print_frequency=20,
+    max_steps=None,
 ):
     sampler.set_epoch(epoch)
     model.train()
@@ -198,7 +207,10 @@ def train_one_epoch_ddp(
                 f"elapsed={elapsed:.1f}s max_mem={memory_gb:.2f}GB",
                 flush=True,
             )
-    return reduce_train_metrics(total_loss, len(loader), time.perf_counter() - started, device)
+        if max_steps is not None and step >= int(max_steps):
+            break
+    completed_steps = min(len(loader), int(max_steps)) if max_steps is not None else len(loader)
+    return reduce_train_metrics(total_loss, completed_steps, time.perf_counter() - started, device)
 
 
 def broadcast_buffers_from_rank0(module):
@@ -234,7 +246,11 @@ def main():
         config = load_config(args.config, require_dataset=True)
         variant = args.variant or str(config["quantization"].get("variant", "M3")).upper()
         backend = config["quantization"].get("backend", "x86")
-        qat_batch_size = int(config["training"].get("qat_batch_size", config["training"]["batch_size"]))
+        qat_batch_size = int(
+            args.per_gpu_batch_size
+            if args.per_gpu_batch_size is not None
+            else config["training"].get("qat_batch_size", config["training"]["batch_size"])
+        )
         train_loader, train_sampler = build_distributed_loader(
             config, "train", rank, world_size, limit=args.limit, batch_size=qat_batch_size,
         )
@@ -287,6 +303,8 @@ def main():
         total_epochs = int(config["training"]["qat_epochs"])
         if args.epochs_this_run is not None and args.epochs_this_run <= 0:
             raise ValueError("--epochs-this-run must be positive")
+        if args.max_steps is not None and args.max_steps <= 0:
+            raise ValueError("--max-steps must be positive")
         weight_only_epochs = int(config["quantization"].get("weight_only_warmup_epochs", 1))
         freeze_epochs = int(config["quantization"].get("observer_freeze_epochs", 2))
         if weight_only_epochs + freeze_epochs > total_epochs:
@@ -334,10 +352,19 @@ def main():
                 phase = "full"
             set_qat_phase(qat_model, phase)
             set_optimizer_lr(optimizer, phase_lrs.get(phase, config["training"]["qat_lr"]))
+            total_loader_steps = len(train_loader)
+            effective_steps = min(total_loader_steps, int(args.max_steps)) if args.max_steps is not None else total_loader_steps
             rank0_print(
                 rank,
                 f"QAT DDP epoch={epoch + 1}/{total_epochs} phase={phase} "
                 f"lr={optimizer.param_groups[0]['lr']:.3e}",
+            )
+            rank0_print(
+                rank,
+                f"train loop ready: total_loader_steps={total_loader_steps} "
+                f"effective_steps={effective_steps} "
+                f"print_frequency={int(config['training'].get('print_frequency', 20))} "
+                f"max_steps={args.max_steps if args.max_steps is not None else 'none'}",
             )
             train_metrics = train_one_epoch_ddp(
                 ddp_model,
@@ -349,6 +376,7 @@ def main():
                 rank,
                 float(config["training"].get("grad_clip_norm", 0)),
                 int(config["training"].get("print_frequency", 20)),
+                args.max_steps,
             )
             dist.barrier()
 
