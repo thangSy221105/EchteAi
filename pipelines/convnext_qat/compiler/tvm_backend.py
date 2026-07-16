@@ -189,6 +189,40 @@ def _flatten_relax_outputs(value):
     return [value]
 
 
+def describe_tvm_output_shape(value):
+    shape = getattr(value, "shape", None)
+    if shape is not None:
+        try:
+            return [int(dim) for dim in shape]
+        except Exception:
+            try:
+                return list(shape)
+            except Exception:
+                pass
+
+    struct_info = getattr(value, "struct_info", None)
+    sinfo_shape = getattr(struct_info, "shape", None) if struct_info is not None else None
+    values = getattr(sinfo_shape, "values", None) if sinfo_shape is not None else None
+    if values is not None:
+        dims = []
+        for dim in values:
+            dim_value = getattr(dim, "value", dim)
+            try:
+                dims.append(int(dim_value))
+            except Exception:
+                dims.append(str(dim_value))
+        return dims
+
+    numpy_method = getattr(value, "numpy", None)
+    if callable(numpy_method):
+        try:
+            return list(numpy_method().shape)
+        except Exception:
+            pass
+
+    return [str(type(value).__name__)]
+
+
 def _make_tvm_array(tvm, sample):
     sample_np = sample.detach().cpu().numpy()
 

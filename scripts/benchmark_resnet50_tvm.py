@@ -14,7 +14,7 @@ import torch
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from pipelines.convnext_qat.compiler import load_tvm_artifact, run_tvm_module
+from pipelines.convnext_qat.compiler import describe_tvm_output_shape, load_tvm_artifact, run_tvm_module
 
 
 def parse_args():
@@ -55,7 +55,7 @@ def main():
         "lib": str(args.lib),
         "metadata": metadata,
         "output_count": len(outputs),
-        "output_shapes": [list(output.shape) for output in outputs],
+        "output_shapes": [describe_tvm_output_shape(output) for output in outputs],
         "tvm_runtime": benchmark(module, input_name, sample, args.warmup_iters, args.iters),
     }
     print(json.dumps(result, indent=2), flush=True)

@@ -18,6 +18,7 @@ from pipelines.convnext_qat.checkpoint import load_checkpoint
 from pipelines.convnext_qat.compiler import (
     build_compiler_target_module,
     compile_tvm_from_module,
+    describe_tvm_output_shape,
     load_tvm_artifact,
     resolve_compiler_scope,
     run_tvm_module,
@@ -146,7 +147,7 @@ def main():
     module, _ = load_tvm_artifact(lib_path)
     outputs = run_tvm_module(module, args.input_name, sample)
     metadata["output_count"] = len(outputs)
-    metadata["output_shapes"] = [list(output.shape) for output in outputs]
+    metadata["output_shapes"] = [describe_tvm_output_shape(output) for output in outputs]
     metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
     print(f"Saved TVM library: {lib_path}", flush=True)

@@ -7,6 +7,7 @@ from .resnet50_backbone import (
 from .tvm_backend import (
     compile_tvm_from_module,
     compile_tvm_from_traced,
+    describe_tvm_output_shape,
     import_tvm,
     load_tvm_artifact,
     run_tvm_module,
@@ -23,6 +24,7 @@ __all__ = [
     "trace_module_for_tvm",
     "compile_tvm_from_module",
     "compile_tvm_from_traced",
+    "describe_tvm_output_shape",
     "save_tvm_artifact",
     "load_tvm_artifact",
     "run_tvm_module",
