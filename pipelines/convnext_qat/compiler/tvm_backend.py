@@ -192,7 +192,20 @@ def _flatten_relax_outputs(value):
 def run_tvm_module(module, input_name, sample):
     runtime = import_tvm()
     tvm = runtime["tvm"]
-    array = tvm.nd.array(sample.detach().cpu().numpy())
+    sample_np = sample.detach().cpu().numpy()
+    ndarray_module = getattr(tvm, "nd", None)
+    if ndarray_module is not None and hasattr(ndarray_module, "array"):
+        array = ndarray_module.array(sample_np)
+    else:
+        runtime_module = getattr(tvm, "runtime", None)
+        runtime_ndarray = getattr(runtime_module, "ndarray", None) if runtime_module is not None else None
+        if runtime_ndarray is not None and hasattr(runtime_ndarray, "array"):
+            array = runtime_ndarray.array(sample_np)
+        else:
+            raise RuntimeError(
+                "The installed TVM build does not expose tvm.nd.array or tvm.runtime.ndarray.array; "
+                "cannot create runtime inputs for the compiled module."
+            )
 
     if runtime["mode"] == "relay" or hasattr(module, "set_input"):
         module.set_input(str(input_name), array)
