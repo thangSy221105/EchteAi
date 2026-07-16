@@ -69,6 +69,22 @@ def _write_int8_calibration_cache(path, metadata):
     return path
 
 
+def _enable_int8_if_supported(trt, config):
+    builder_flag = getattr(trt, "BuilderFlag", None)
+    if builder_flag is None:
+        return False
+    int8_flag = getattr(builder_flag, "INT8", None)
+    if int8_flag is None:
+        int8_flag = getattr(builder_flag, "kINT8", None)
+    if int8_flag is None:
+        return False
+    if hasattr(config, "set_flag"):
+        config.set_flag(int8_flag)
+    else:
+        config.flags |= 1 << int(int8_flag)
+    return True
+
+
 def main():
     args = parse_args()
     trt = load_tensorrt()
@@ -107,10 +123,12 @@ def main():
     config.add_optimization_profile(profile)
 
     if args.precision == "int8":
-        if hasattr(config, "set_flag"):
-            config.set_flag(trt.BuilderFlag.INT8)
-        else:
-            config.flags |= 1 << int(trt.BuilderFlag.INT8)
+        enabled = _enable_int8_if_supported(trt, config)
+        if not enabled:
+            print(
+                "TensorRT INT8 builder flag is unavailable in this runtime; relying on explicit Q/DQ ONNX graph.",
+                flush=True,
+            )
         calib_cache = args.calib_cache or engine_path.with_suffix(".cache")
         _write_int8_calibration_cache(calib_cache, metadata)
 
