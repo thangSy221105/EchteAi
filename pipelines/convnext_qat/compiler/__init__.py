@@ -5,6 +5,7 @@ from .resnet50_backbone import (
     resolve_compiler_scope,
 )
 from .tvm_backend import (
+    compile_tvm_from_module,
     compile_tvm_from_traced,
     import_tvm,
     load_tvm_artifact,
@@ -20,6 +21,7 @@ __all__ = [
     "build_compiler_target_module",
     "import_tvm",
     "trace_module_for_tvm",
+    "compile_tvm_from_module",
     "compile_tvm_from_traced",
     "save_tvm_artifact",
     "load_tvm_artifact",

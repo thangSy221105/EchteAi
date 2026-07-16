@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib
+import inspect
 import json
 from pathlib import Path
 
@@ -11,14 +13,52 @@ import torch
 def import_tvm():
     try:
         import tvm
-        from tvm import relay
-        from tvm.contrib import graph_executor
     except ImportError as error:
         raise RuntimeError(
             "TVM is required for this step. Install a compatible TVM build in the runtime "
             "before running the compiler-first TVM scripts."
         ) from error
-    return tvm, relay, graph_executor
+
+    relay = getattr(tvm, "relay", None)
+    if relay is not None:
+        from tvm.contrib import graph_executor
+
+        return {
+            "mode": "relay",
+            "tvm": tvm,
+            "relay": relay,
+            "graph_executor": graph_executor,
+        }
+
+    relax = getattr(tvm, "relax", None)
+    if relax is None:
+        raise RuntimeError(
+            "The installed TVM build exposes neither relay nor relax. "
+            "A compiler-capable TVM build is required."
+        )
+
+    try:
+        frontend_torch = importlib.import_module("tvm.relax.frontend.torch")
+    except ImportError as error:
+        raise RuntimeError(
+            "This TVM build exposes relax but not tvm.relax.frontend.torch. "
+            "Install a TVM build with the PyTorch Relax frontend enabled."
+        ) from error
+
+    vm_cls = getattr(relax, "VirtualMachine", None)
+    if vm_cls is None:
+        vm_module = getattr(relax, "vm", None)
+        vm_cls = getattr(vm_module, "VirtualMachine", None) if vm_module is not None else None
+    if vm_cls is None:
+        raise RuntimeError("Could not locate Relax VirtualMachine runtime class in the installed TVM build.")
+
+    return {
+        "mode": "relax",
+        "tvm": tvm,
+        "relax": relax,
+        "frontend_torch": frontend_torch,
+        "virtual_machine_cls": vm_cls,
+    }
 
 
 def trace_module_for_tvm(module, sample):
@@ -28,39 +68,136 @@ def trace_module_for_tvm(module, sample):
     return torch.jit.freeze(traced.eval())
 
 
-def compile_tvm_from_traced(traced_module, input_name, input_shape, target, opt_level=3):
-    tvm, relay, _ = import_tvm()
-    mod, params = relay.frontend.from_pytorch(
-        traced_module,
-        [(str(input_name), tuple(int(value) for value in input_shape))],
-    )
+def export_module_for_relax(module, sample):
+    module = module.cpu().eval()
+    export_kwargs = {}
+    signature = inspect.signature(torch.export.export)
+    if "strict" in signature.parameters:
+        export_kwargs["strict"] = False
+    return torch.export.export(module, (sample.cpu(),), **export_kwargs)
+
+
+def _compile_relax(frontend_torch, relax, module, sample, target):
+    exported_program = export_module_for_relax(module, sample)
+
+    if hasattr(frontend_torch, "from_exported_program"):
+        imported = frontend_torch.from_exported_program(exported_program)
+    elif hasattr(frontend_torch, "from_fx"):
+        gm = torch.fx.symbolic_trace(module.cpu().eval())
+        imported = frontend_torch.from_fx(gm, [sample.cpu()])
+    else:
+        raise RuntimeError(
+            "Relax frontend torch module does not expose from_exported_program or from_fx; "
+            "cannot import this PyTorch module into TVM Relax."
+        )
+
+    mod = imported[0] if isinstance(imported, tuple) else imported
+    return relax.build(mod, target=target)
+
+
+def compile_tvm_from_module(module, sample, input_name, target, opt_level=3):
+    runtime = import_tvm()
+    tvm = runtime["tvm"]
+
+    if runtime["mode"] == "relay":
+        traced_module = trace_module_for_tvm(module, sample)
+        mod, params = runtime["relay"].frontend.from_pytorch(
+            traced_module,
+            [(str(input_name), tuple(int(value) for value in sample.shape))],
+        )
+        with tvm.transform.PassContext(opt_level=int(opt_level)):
+            compiled = runtime["relay"].build(mod, target=target, params=params)
+        return compiled, "relay"
+
     with tvm.transform.PassContext(opt_level=int(opt_level)):
-        lib = relay.build(mod, target=target, params=params)
-    return lib
+        compiled = _compile_relax(runtime["frontend_torch"], runtime["relax"], module, sample, target)
+    return compiled, "relax"
 
 
-def save_tvm_artifact(artifact_dir, lib, metadata, artifact_name):
+def compile_tvm_from_traced(traced_module, input_name, input_shape, target, opt_level=3):
+    sample = torch.randn(*tuple(int(value) for value in input_shape))
+    compiled, _ = compile_tvm_from_module(traced_module, sample, input_name, target, opt_level=opt_level)
+    return compiled
+
+
+def _export_library_target(compiled):
+    if hasattr(compiled, "export_library"):
+        return compiled
+    mod = getattr(compiled, "mod", None)
+    if mod is not None and hasattr(mod, "export_library"):
+        return mod
+    lib = getattr(compiled, "lib", None)
+    if lib is not None and hasattr(lib, "export_library"):
+        return lib
+    raise RuntimeError("Compiled TVM artifact does not expose export_library(); cannot save this artifact.")
+
+
+def save_tvm_artifact(artifact_dir, compiled, metadata, artifact_name):
     artifact_dir = Path(artifact_dir)
     artifact_dir.mkdir(parents=True, exist_ok=True)
     lib_path = artifact_dir / artifact_name
     metadata_path = artifact_dir / f"{lib_path.stem}_metadata.json"
-    lib.export_library(str(lib_path))
+    _export_library_target(compiled).export_library(str(lib_path))
     metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     return lib_path, metadata_path
 
 
-def load_tvm_artifact(lib_path, device_type="cpu", device_index=0):
-    tvm, _, graph_executor = import_tvm()
-    lib = tvm.runtime.load_module(str(lib_path))
+def _infer_metadata_path(lib_path, metadata_path=None):
+    if metadata_path is not None:
+        return Path(metadata_path)
+    lib_path = Path(lib_path)
+    candidate = lib_path.with_name(f"{lib_path.stem}_metadata.json")
+    return candidate if candidate.exists() else None
+
+
+def load_tvm_artifact(lib_path, metadata_path=None, device_type="cpu", device_index=0):
+    runtime = import_tvm()
+    tvm = runtime["tvm"]
     if str(device_type).lower() != "cpu":
         raise ValueError("Current compiler-first TVM path supports only CPU runtime")
     dev = tvm.cpu(int(device_index))
-    module = graph_executor.GraphModule(lib["default"](dev))
-    return module, dev
+    lib = tvm.runtime.load_module(str(lib_path))
+
+    metadata_file = _infer_metadata_path(lib_path, metadata_path)
+    metadata = {}
+    if metadata_file is not None and Path(metadata_file).exists():
+        metadata = json.loads(Path(metadata_file).read_text(encoding="utf-8"))
+    mode = str(metadata.get("tvm_mode", runtime["mode"])).lower()
+
+    if mode == "relay":
+        module = runtime["graph_executor"].GraphModule(lib["default"](dev))
+        return module, dev
+
+    vm = runtime["virtual_machine_cls"](lib, dev)
+    return vm, dev
+
+
+def _flatten_relax_outputs(value):
+    if isinstance(value, (list, tuple)):
+        flat = []
+        for item in value:
+            flat.extend(_flatten_relax_outputs(item))
+        return flat
+
+    fields = getattr(value, "fields", None)
+    if fields is not None:
+        flat = []
+        for item in fields:
+            flat.extend(_flatten_relax_outputs(item))
+        return flat
+
+    return [value]
 
 
 def run_tvm_module(module, input_name, sample):
-    tvm, _, _ = import_tvm()
-    module.set_input(str(input_name), tvm.nd.array(sample.detach().cpu().numpy()))
-    module.run()
-    return [module.get_output(index) for index in range(module.get_num_outputs())]
+    runtime = import_tvm()
+    tvm = runtime["tvm"]
+    array = tvm.nd.array(sample.detach().cpu().numpy())
+
+    if runtime["mode"] == "relay" or hasattr(module, "set_input"):
+        module.set_input(str(input_name), array)
+        module.run()
+        return [module.get_output(index) for index in range(module.get_num_outputs())]
+
+    result = module["main"](array)
+    return _flatten_relax_outputs(result)

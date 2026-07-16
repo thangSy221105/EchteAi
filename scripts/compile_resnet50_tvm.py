@@ -17,12 +17,11 @@ sys.path.insert(0, str(REPO_ROOT))
 from pipelines.convnext_qat.checkpoint import load_checkpoint
 from pipelines.convnext_qat.compiler import (
     build_compiler_target_module,
-    compile_tvm_from_traced,
+    compile_tvm_from_module,
     load_tvm_artifact,
     resolve_compiler_scope,
     run_tvm_module,
     save_tvm_artifact,
-    trace_module_for_tvm,
 )
 from pipelines.convnext_qat.config import load_config, quantized_modules_for_variant
 from pipelines.convnext_qat.models import build_fasterrcnn_convnext
@@ -123,11 +122,10 @@ def main():
     )
     target_module = build_compiler_target_module(model, config).cpu().eval()
     sample = torch.randn(batch_size, 3, height, width)
-    traced = trace_module_for_tvm(target_module, sample)
-    lib = compile_tvm_from_traced(
-        traced,
+    compiled, tvm_mode = compile_tvm_from_module(
+        target_module,
+        sample,
         input_name=args.input_name,
-        input_shape=sample.shape,
         target=args.target,
         opt_level=args.opt_level,
     )
@@ -137,12 +135,13 @@ def main():
         "model_kind": args.model,
         "backbone": config["model"].get("backbone", "unknown"),
         "scope": scope,
+        "tvm_mode": tvm_mode,
         "target": args.target,
         "input_name": args.input_name,
         "example_shape": list(sample.shape),
         "checkpoint_extra": payload.get("extra", {}) if isinstance(payload, dict) else {},
     }
-    lib_path, metadata_path = save_tvm_artifact(artifact_dir, lib, metadata, artifact_name)
+    lib_path, metadata_path = save_tvm_artifact(artifact_dir, compiled, metadata, artifact_name)
 
     module, _ = load_tvm_artifact(lib_path)
     outputs = run_tvm_module(module, args.input_name, sample)
