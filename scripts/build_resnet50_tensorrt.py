@@ -31,6 +31,16 @@ def _logger(trt):
     return trt.Logger(trt.Logger.WARNING)
 
 
+def _network_creation_flags(trt):
+    flag_enum = getattr(trt, "NetworkDefinitionCreationFlag", None)
+    if flag_enum is None:
+        return 0
+    explicit_batch = getattr(flag_enum, "EXPLICIT_BATCH", None)
+    if explicit_batch is None:
+        return 0
+    return 1 << int(explicit_batch)
+
+
 def _set_workspace(config, workspace_mb):
     if hasattr(config, "set_memory_pool_limit"):
         config.set_memory_pool_limit(int(config.MemoryPoolType.WORKSPACE), int(workspace_mb) * 1024 * 1024)
@@ -71,7 +81,7 @@ def main():
 
     logger = _logger(trt)
     builder = trt.Builder(logger)
-    flags = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+    flags = _network_creation_flags(trt)
     network = builder.create_network(flags)
     parser = trt.OnnxParser(network, logger)
     if not parser.parse(onnx_path.read_bytes()):
