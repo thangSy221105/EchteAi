@@ -41,9 +41,15 @@ def _network_creation_flags(trt):
     return 1 << int(explicit_batch)
 
 
-def _set_workspace(config, workspace_mb):
+def _set_workspace(trt, config, workspace_mb):
     if hasattr(config, "set_memory_pool_limit"):
-        config.set_memory_pool_limit(int(config.MemoryPoolType.WORKSPACE), int(workspace_mb) * 1024 * 1024)
+        pool_type = getattr(trt, "MemoryPoolType", None)
+        if pool_type is not None and hasattr(pool_type, "WORKSPACE"):
+            config.set_memory_pool_limit(pool_type.WORKSPACE, int(workspace_mb) * 1024 * 1024)
+            return
+        if hasattr(config, "max_workspace_size"):
+            config.max_workspace_size = int(workspace_mb) * 1024 * 1024
+            return
     else:
         config.max_workspace_size = int(workspace_mb) * 1024 * 1024
 
@@ -94,7 +100,7 @@ def main():
         raise RuntimeError("TensorRT ONNX parse failed:\n" + "\n".join(errors))
 
     config = builder.create_builder_config()
-    _set_workspace(config, args.workspace_mb)
+    _set_workspace(trt, config, args.workspace_mb)
 
     profile = builder.create_optimization_profile()
     profile.set_shape(input_name, example_shape, example_shape, example_shape)
