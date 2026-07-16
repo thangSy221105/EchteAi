@@ -46,7 +46,47 @@ def parse_args():
     parser.add_argument("--artifact-dir")
     parser.add_argument("--opset", type=int, default=17)
     parser.add_argument("--force-w8a8", action="store_true")
+    parser.add_argument("--tensorrt-friendly-int8", action="store_true")
     return parser.parse_args()
+
+
+def normalize_qdq_zero_points_for_tensorrt(onnx_path: Path):
+    import onnx
+    from onnx import numpy_helper
+    import numpy as np
+
+    model = onnx.load(str(onnx_path), load_external_data=True)
+    initializer_by_name = {initializer.name: initializer for initializer in model.graph.initializer}
+    touched = 0
+
+    for node in model.graph.node:
+        if node.op_type not in {"QuantizeLinear", "DequantizeLinear"}:
+            continue
+        if len(node.input) < 3:
+            continue
+        zero_point_name = node.input[2]
+        initializer = initializer_by_name.get(zero_point_name)
+        if initializer is None:
+            continue
+        array = numpy_helper.to_array(initializer)
+        if array.size == 0:
+            continue
+        zeroed = np.zeros_like(array)
+        replacement = numpy_helper.from_array(zeroed, name=initializer.name)
+        initializer.CopyFrom(replacement)
+        touched += 1
+
+    if touched:
+        onnx.save_model(
+            model,
+            str(onnx_path),
+            save_as_external_data=True,
+            all_tensors_to_one_file=True,
+            location=f"{onnx_path.name}.data",
+            size_threshold=1024,
+            convert_attribute=False,
+        )
+    return touched
 
 
 def load_source_model(config, model_kind, fp32_checkpoint=None, qat_checkpoint=None, force_w8a8=False):
@@ -143,6 +183,14 @@ def main():
             **export_kwargs,
         )
 
+    normalized_zero_points = 0
+    if args.model == "qat_graph" and args.tensorrt_friendly_int8:
+        normalized_zero_points = normalize_qdq_zero_points_for_tensorrt(onnx_path)
+        print(
+            f"Normalized {normalized_zero_points} Q/DQ zero-point initializer(s) to zero for TensorRT compatibility.",
+            flush=True,
+        )
+
     metadata = {
         "model_kind": args.model,
         "backbone": config["model"].get("backbone", "unknown"),
@@ -153,6 +201,8 @@ def main():
         "example_shape": list(sample.shape),
         "checkpoint_extra": payload.get("extra", {}) if isinstance(payload, dict) else {},
         "force_w8a8": bool(args.force_w8a8),
+        "tensorrt_friendly_int8": bool(args.tensorrt_friendly_int8),
+        "normalized_zero_points": int(normalized_zero_points),
         "opset": int(args.opset),
     }
     metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
