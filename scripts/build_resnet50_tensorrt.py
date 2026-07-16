@@ -84,7 +84,12 @@ def main():
     flags = _network_creation_flags(trt)
     network = builder.create_network(flags)
     parser = trt.OnnxParser(network, logger)
-    if not parser.parse(onnx_path.read_bytes()):
+    parsed = False
+    if hasattr(parser, "parse_from_file"):
+        parsed = bool(parser.parse_from_file(str(onnx_path)))
+    else:
+        parsed = bool(parser.parse(onnx_path.read_bytes()))
+    if not parsed:
         errors = [parser.get_error(i).desc() for i in range(parser.num_errors)]
         raise RuntimeError("TensorRT ONNX parse failed:\n" + "\n".join(errors))
 
