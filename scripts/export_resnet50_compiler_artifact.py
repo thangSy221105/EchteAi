@@ -137,7 +137,8 @@ def main():
         artifact_path = artifact_dir / f"resnet50_{scope}_{suffix}_state_dict.pt"
         torch.save(target.state_dict(), artifact_path)
 
-    metadata_path = artifact_dir / f"resnet50_{scope}_metadata.json"
+    metadata_suffix = "int8" if args.model == "int8" else "fp32"
+    metadata_path = artifact_dir / f"resnet50_{scope}_{metadata_suffix}_metadata.json"
     metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
     print(f"Saved artifact: {artifact_path}", flush=True)
