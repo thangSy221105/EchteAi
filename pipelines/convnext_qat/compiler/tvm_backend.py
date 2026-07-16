@@ -189,23 +189,58 @@ def _flatten_relax_outputs(value):
     return [value]
 
 
+def _make_tvm_array(tvm, sample):
+    sample_np = sample.detach().cpu().numpy()
+
+    candidates = []
+    ndarray_module = getattr(tvm, "nd", None)
+    if ndarray_module is not None:
+        candidates.append(getattr(ndarray_module, "array", None))
+
+    candidates.append(getattr(tvm, "array", None))
+
+    runtime_module = getattr(tvm, "runtime", None)
+    if runtime_module is not None:
+        runtime_ndarray = getattr(runtime_module, "ndarray", None)
+        if runtime_ndarray is not None:
+            candidates.append(getattr(runtime_ndarray, "array", None))
+
+    for fn in candidates:
+        if callable(fn):
+            try:
+                return fn(sample_np)
+            except TypeError:
+                continue
+            except Exception:
+                continue
+
+    dlpack_candidates = []
+    if runtime_module is not None:
+        runtime_ndarray = getattr(runtime_module, "ndarray", None)
+        if runtime_ndarray is not None:
+            dlpack_candidates.append(getattr(runtime_ndarray, "from_dlpack", None))
+    dlpack_candidates.append(getattr(tvm, "from_dlpack", None))
+
+    dlpack_capsule = torch.utils.dlpack.to_dlpack(sample.detach().cpu().contiguous())
+    for fn in dlpack_candidates:
+        if callable(fn):
+            try:
+                return fn(dlpack_capsule)
+            except TypeError:
+                continue
+            except Exception:
+                continue
+
+    raise RuntimeError(
+        "The installed TVM build does not expose a usable array constructor. "
+        "Tried tvm.nd.array, tvm.array, tvm.runtime.ndarray.array, and DLPack-based fallbacks."
+    )
+
+
 def run_tvm_module(module, input_name, sample):
     runtime = import_tvm()
     tvm = runtime["tvm"]
-    sample_np = sample.detach().cpu().numpy()
-    ndarray_module = getattr(tvm, "nd", None)
-    if ndarray_module is not None and hasattr(ndarray_module, "array"):
-        array = ndarray_module.array(sample_np)
-    else:
-        runtime_module = getattr(tvm, "runtime", None)
-        runtime_ndarray = getattr(runtime_module, "ndarray", None) if runtime_module is not None else None
-        if runtime_ndarray is not None and hasattr(runtime_ndarray, "array"):
-            array = runtime_ndarray.array(sample_np)
-        else:
-            raise RuntimeError(
-                "The installed TVM build does not expose tvm.nd.array or tvm.runtime.ndarray.array; "
-                "cannot create runtime inputs for the compiled module."
-            )
+    array = _make_tvm_array(tvm, sample)
 
     if runtime["mode"] == "relay" or hasattr(module, "set_input"):
         module.set_input(str(input_name), array)
