@@ -29,6 +29,11 @@ def load_config(path, require_dataset=False):
     policy_output = mixed_precision.get("policy_output")
     if policy_output and not Path(policy_output).is_absolute():
         mixed_precision["policy_output"] = str((root / policy_output).resolve())
+    compiler = config.get("quantization", {}).get("compiler", {})
+    for key in ("artifact_dir", "benchmark_json"):
+        value = compiler.get(key)
+        if value and not Path(value).is_absolute():
+            compiler[key] = str((root / value).resolve())
     if require_dataset:
         validate_dataset_paths(config)
     return config
