@@ -49,7 +49,14 @@ def load_engine(trt, engine_path):
     return runtime, engine
 
 
-def create_execution(engine, input_name, shape, cuda):
+def _tensor_io_mode_enum(trt, engine):
+    enum_obj = getattr(trt, "TensorIOMode", None)
+    if enum_obj is not None:
+        return enum_obj
+    return getattr(engine, "TensorIOMode", None)
+
+
+def create_execution(trt, engine, input_name, shape, cuda):
     context = engine.create_execution_context()
     stream = cuda.Stream()
     if hasattr(context, "set_input_shape"):
@@ -58,9 +65,14 @@ def create_execution(engine, input_name, shape, cuda):
         index = engine.get_binding_index(input_name)
         context.set_binding_shape(index, shape)
 
+    tensor_mode_enum = _tensor_io_mode_enum(trt, engine)
     tensor_names = [engine.get_tensor_name(i) for i in range(engine.num_io_tensors)] if hasattr(engine, "num_io_tensors") else []
     if tensor_names:
-        output_names = [name for name in tensor_names if engine.get_tensor_mode(name) == engine.TensorIOMode.OUTPUT]
+        output_mode = getattr(tensor_mode_enum, "OUTPUT", None) if tensor_mode_enum is not None else None
+        output_names = [
+            name for name in tensor_names
+            if output_mode is not None and engine.get_tensor_mode(name) == output_mode
+        ]
         input_dtype = np.float32
         input_size = int(np.prod(shape))
         host_input = np.random.randn(*shape).astype(input_dtype)
@@ -127,7 +139,7 @@ def run_once(state, input_name, cuda):
 
 def benchmark(engine_path, input_name, shape, warmup_iters, iters, trt, cuda):
     runtime, engine = load_engine(trt, engine_path)
-    state = create_execution(engine, input_name, shape, cuda)
+    state = create_execution(trt, engine, input_name, shape, cuda)
     for _ in range(warmup_iters):
         run_once(state, input_name, cuda)
     timings = []
