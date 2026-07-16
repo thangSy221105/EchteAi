@@ -158,9 +158,18 @@ def main():
         end_epoch = min(start_epoch + args.epochs_this_run, total_epochs)
 
     for epoch in range(start_epoch, end_epoch):
+        total_loader_steps = len(train_loader)
+        effective_steps = min(total_loader_steps, int(args.max_steps)) if args.max_steps is not None else total_loader_steps
         print(
             f"FP32 epoch={epoch + 1}/{total_epochs} "
             f"lr={optimizer.param_groups[0]['lr']:.3e}",
+            flush=True,
+        )
+        print(
+            f"train loop ready: total_loader_steps={total_loader_steps} "
+            f"effective_steps={effective_steps} "
+            f"print_frequency={int(config['training'].get('print_frequency', 20))} "
+            f"max_steps={args.max_steps if args.max_steps is not None else 'none'}",
             flush=True,
         )
         warmup_scheduler = None
