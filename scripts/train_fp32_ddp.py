@@ -44,6 +44,11 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/seadronessee_colab.yaml")
     parser.add_argument("--limit", type=int)
+    parser.add_argument(
+        "--per-gpu-batch-size",
+        type=int,
+        help="override training.fp32_batch_size with an explicit per-GPU batch size",
+    )
     parser.add_argument("--resume", help="resume an FP32 training checkpoint")
     parser.add_argument(
         "--epochs-this-run", type=int,
@@ -93,12 +98,14 @@ def build_distributed_loader(config, split, rank, world_size, limit=None, batch_
         augmentation={
             **(config.get("augmentation", {}) if split == "train" else {}),
             "ignore_category_ids": dataset_cfg.get("ignore_category_ids", []),
+            "binary_collapse_foreground": dataset_cfg.get("binary_collapse_foreground", False),
         },
     )
-    if int(dataset_cfg["num_classes"]) != len(dataset.category_id_to_label) + 1:
+    expected_num_classes = 2 if bool(dataset_cfg.get("binary_collapse_foreground", False)) else len(dataset.category_id_to_label) + 1
+    if int(dataset_cfg["num_classes"]) != expected_num_classes:
         raise ValueError(
             f"dataset.num_classes={dataset_cfg['num_classes']} but {split} annotations "
-            f"contain {len(dataset.category_id_to_label)} foreground categories"
+            f"contain {1 if bool(dataset_cfg.get('binary_collapse_foreground', False)) else len(dataset.category_id_to_label)} foreground categories"
         )
     if limit is not None:
         dataset = Subset(dataset, range(min(int(limit), len(dataset))))
@@ -201,7 +208,11 @@ def main():
     local_rank, rank, world_size, device = setup_distributed()
     try:
         config = load_config(args.config, require_dataset=True)
-        batch_size = int(config["training"].get("fp32_batch_size", config["training"]["batch_size"]))
+        batch_size = int(
+            args.per_gpu_batch_size
+            if args.per_gpu_batch_size is not None
+            else config["training"].get("fp32_batch_size", config["training"]["batch_size"])
+        )
         train_loader, train_sampler = build_distributed_loader(
             config, "train", rank, world_size, limit=args.limit, batch_size=batch_size,
         )
