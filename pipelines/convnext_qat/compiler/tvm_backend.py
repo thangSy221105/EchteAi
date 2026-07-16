@@ -241,7 +241,7 @@ def run_tvm_module(module, input_name, sample):
     runtime = import_tvm()
     tvm = runtime["tvm"]
 
-    if runtime["mode"] == "relay" or hasattr(module, "set_input"):
+    if runtime["mode"] == "relay":
         array = _make_tvm_array(tvm, sample)
         module.set_input(str(input_name), array)
         module.run()
