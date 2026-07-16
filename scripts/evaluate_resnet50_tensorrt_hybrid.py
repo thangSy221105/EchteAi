@@ -254,7 +254,9 @@ def evaluate_hybrid_model(model, backbone_runner, loader, device, fixed_height, 
     print("hybrid inference completed; calculating detection metrics", flush=True)
     metrics = native_detection_metrics(predictions, targets)
     dataset = unwrap_coco_dataset(loader.dataset)
-    canonical = _coco_metrics(predictions, targets, dataset)
+    canonical = None
+    if not bool(getattr(dataset, "binary_collapse_foreground", False)):
+        canonical = _coco_metrics(predictions, targets, dataset)
     if canonical:
         metrics.update(canonical)
     metrics["avg_inference_ms_per_image"] = sum(timings) / max(len(timings), 1)
