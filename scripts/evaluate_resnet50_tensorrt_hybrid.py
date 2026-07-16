@@ -97,9 +97,7 @@ class TensorRTBackboneRunner:
         self.tensor_mode_enum = _tensor_io_mode_enum(trt, self.engine)
         self.input_name, self.output_names = self._discover_tensors()
         self.current_shape = None
-        self.d_input = None
-        self.host_output_buffers = {}
-        self.d_output_buffers = {}
+        self.output_tensors = {}
 
     def _discover_tensors(self):
         tensor_names = [self.engine.get_tensor_name(i) for i in range(self.engine.num_io_tensors)]
@@ -120,17 +118,12 @@ class TensorRTBackboneRunner:
         else:
             index = self.engine.get_binding_index(self.input_name)
             self.context.set_binding_shape(index, shape)
-        input_nbytes = int(np.prod(shape)) * np.dtype(np.float32).itemsize
-        self.d_input = self.cuda.mem_alloc(input_nbytes)
-        self.host_output_buffers = {}
-        self.d_output_buffers = {}
+        self.output_tensors = {}
         for name in self.output_names:
             out_shape = tuple(int(v) for v in self.context.get_tensor_shape(name))
             out_dtype = _trt_dtype_to_numpy(self.trt, self.engine.get_tensor_dtype(name))
-            host_out = np.empty(out_shape, dtype=out_dtype)
-            d_out = self.cuda.mem_alloc(host_out.nbytes)
-            self.host_output_buffers[name] = host_out
-            self.d_output_buffers[name] = d_out
+            torch_dtype = torch.from_numpy(np.empty((), dtype=out_dtype)).dtype
+            self.output_tensors[name] = torch.empty(out_shape, device="cuda", dtype=torch_dtype)
         self.current_shape = shape
 
     def __call__(self, batch_tensor: torch.Tensor):
@@ -138,25 +131,15 @@ class TensorRTBackboneRunner:
             raise ValueError("TensorRT backbone expects a CUDA tensor input")
         shape = tuple(int(v) for v in batch_tensor.shape)
         self._allocate(shape)
-
-        host_input = batch_tensor.detach().cpu().numpy().astype(np.float32, copy=False)
-        self.cuda.memcpy_htod_async(self.d_input, host_input, self.stream)
-
-        self.context.set_tensor_address(self.input_name, int(self.d_input))
-        for name, ptr in self.d_output_buffers.items():
-            self.context.set_tensor_address(name, int(ptr))
+        self.context.set_tensor_address(self.input_name, int(batch_tensor.data_ptr()))
+        for name, tensor in self.output_tensors.items():
+            self.context.set_tensor_address(name, int(tensor.data_ptr()))
 
         ok = self.context.execute_async_v3(self.stream.handle)
         if not ok:
             raise RuntimeError("TensorRT hybrid backbone execution failed.")
         self.stream.synchronize()
-
-        outputs = []
-        for name in self.output_names:
-            host_out = self.host_output_buffers[name]
-            self.cuda.memcpy_dtoh(host_out, self.d_output_buffers[name])
-            outputs.append(torch.from_numpy(host_out.copy()).to(batch_tensor.device))
-        return tuple(outputs)
+        return tuple(self.output_tensors[name] for name in self.output_names)
 
 
 def load_hybrid_model(config, checkpoint, device):
