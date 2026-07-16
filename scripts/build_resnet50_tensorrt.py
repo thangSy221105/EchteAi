@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
-"""Build TensorRT engines from exported ONNX backbone artifacts via trtexec."""
+"""Build TensorRT engines from exported ONNX backbone artifacts."""
 
 from __future__ import annotations
 
 import argparse
 import json
-import shutil
-import subprocess
-import sys
 from pathlib import Path
 
 
@@ -18,74 +15,100 @@ def parse_args():
     parser.add_argument("--engine")
     parser.add_argument("--precision", choices=["fp32", "int8"], required=True)
     parser.add_argument("--workspace-mb", type=int, default=4096)
-    parser.add_argument("--trtexec", default="trtexec")
-    parser.add_argument("--extra-arg", action="append", default=[])
+    parser.add_argument("--calib-cache")
     return parser.parse_args()
 
 
-def find_trtexec(binary_name):
-    resolved = shutil.which(binary_name)
-    if resolved:
-        return resolved
-    common = [
-        "/usr/src/tensorrt/bin/trtexec",
-        "/usr/local/tensorrt/bin/trtexec",
-        "/usr/local/bin/trtexec",
-    ]
-    for candidate in common:
-        if Path(candidate).is_file():
-            return candidate
-    raise FileNotFoundError(
-        f"Could not find trtexec ({binary_name}). Install TensorRT or pass --trtexec with a full path."
-    )
+def load_tensorrt():
+    try:
+        import tensorrt as trt
+    except ImportError as error:
+        raise RuntimeError("TensorRT Python package is required for this step.") from error
+    return trt
+
+
+def _logger(trt):
+    return trt.Logger(trt.Logger.WARNING)
+
+
+def _set_workspace(config, workspace_mb):
+    if hasattr(config, "set_memory_pool_limit"):
+        config.set_memory_pool_limit(int(config.MemoryPoolType.WORKSPACE), int(workspace_mb) * 1024 * 1024)
+    else:
+        config.max_workspace_size = int(workspace_mb) * 1024 * 1024
+
+
+def _shape_from_text(text):
+    return tuple(int(value) for value in str(text).split("x"))
+
+
+def _write_int8_calibration_cache(path, metadata):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    scales = metadata.get("checkpoint_extra", {}).get("calibration_cache")
+    if isinstance(scales, str) and scales.strip():
+        path.write_text(scales, encoding="utf-8")
+        return path
+    path.write_text("", encoding="utf-8")
+    return path
 
 
 def main():
     args = parse_args()
+    trt = load_tensorrt()
+
     onnx_path = Path(args.onnx)
     if not onnx_path.is_file():
         raise FileNotFoundError(f"ONNX model not found: {onnx_path}")
 
     metadata_path = Path(args.metadata) if args.metadata else onnx_path.with_name(f"{onnx_path.stem}_metadata.json")
     metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.is_file() else {}
-    example_shape = metadata.get("example_shape", [1, 3, 256, 320])
+    example_shape = tuple(int(v) for v in metadata.get("example_shape", [1, 3, 256, 320]))
     input_name = metadata.get("input_name", "input0")
 
     engine_path = Path(args.engine) if args.engine else onnx_path.with_suffix(f".{args.precision}.engine")
     engine_path.parent.mkdir(parents=True, exist_ok=True)
 
-    shape_text = "x".join(str(int(v)) for v in example_shape)
-    trtexec = find_trtexec(args.trtexec)
-    command = [
-        trtexec,
-        f"--onnx={onnx_path}",
-        f"--saveEngine={engine_path}",
-        f"--memPoolSize=workspace:{int(args.workspace_mb)}",
-        f"--shapes={input_name}:{shape_text}",
-    ]
-    if args.precision == "int8":
-        command.append("--int8")
-    else:
-        command.append("--fp32")
-    command.extend(args.extra_arg)
+    logger = _logger(trt)
+    builder = trt.Builder(logger)
+    flags = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+    network = builder.create_network(flags)
+    parser = trt.OnnxParser(network, logger)
+    if not parser.parse(onnx_path.read_bytes()):
+        errors = [parser.get_error(i).desc() for i in range(parser.num_errors)]
+        raise RuntimeError("TensorRT ONNX parse failed:\n" + "\n".join(errors))
 
-    print("Running:", " ".join(str(part) for part in command), flush=True)
-    proc = subprocess.run(command, text=True, capture_output=True)
-    print(proc.stdout, end="" if proc.stdout.endswith("\n") or not proc.stdout else "\n")
-    if proc.stderr:
-        print(proc.stderr, file=sys.stderr, end="" if proc.stderr.endswith("\n") else "\n")
-    if proc.returncode != 0:
-        raise subprocess.CalledProcessError(proc.returncode, command)
+    config = builder.create_builder_config()
+    _set_workspace(config, args.workspace_mb)
+
+    profile = builder.create_optimization_profile()
+    profile.set_shape(input_name, example_shape, example_shape, example_shape)
+    config.add_optimization_profile(profile)
+
+    if args.precision == "int8":
+        if hasattr(config, "set_flag"):
+            config.set_flag(trt.BuilderFlag.INT8)
+        else:
+            config.flags |= 1 << int(trt.BuilderFlag.INT8)
+        calib_cache = args.calib_cache or engine_path.with_suffix(".cache")
+        _write_int8_calibration_cache(calib_cache, metadata)
+
+    serialized = builder.build_serialized_network(network, config)
+    if serialized is None:
+        raise RuntimeError("TensorRT failed to build a serialized engine.")
+    engine_path.write_bytes(bytes(serialized))
 
     summary = {
         "onnx": str(onnx_path),
         "engine": str(engine_path),
         "precision": args.precision,
         "input_name": input_name,
-        "example_shape": example_shape,
+        "example_shape": list(example_shape),
+        "tensorrt_version": trt.__version__,
     }
     summary_path = engine_path.with_suffix(engine_path.suffix + ".json")
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(json.dumps(summary, indent=2), flush=True)
     print(f"Saved engine summary: {summary_path}", flush=True)
 
 

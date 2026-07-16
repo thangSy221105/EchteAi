@@ -1,23 +1,14 @@
 #!/usr/bin/env python3
-"""Benchmark TensorRT FP32 and INT8 engines with trtexec."""
+"""Benchmark TensorRT FP32 and INT8 engines with TensorRT Python API."""
 
 from __future__ import annotations
 
 import argparse
 import json
-import re
-import shutil
-import subprocess
+import time
 from pathlib import Path
 
-
-_MEAN_PATTERNS = (
-    re.compile(r"GPU Compute Time:\s*min = .*? mean = ([0-9.]+) ms", re.IGNORECASE),
-    re.compile(r"Latency:\s*min = .*? mean = ([0-9.]+) ms", re.IGNORECASE),
-)
-_THROUGHPUT_PATTERNS = (
-    re.compile(r"Throughput:\s*([0-9.]+)\s*qps", re.IGNORECASE),
-)
+import numpy as np
 
 
 def parse_args():
@@ -25,78 +16,137 @@ def parse_args():
     parser.add_argument("--fp32-engine", required=True)
     parser.add_argument("--int8-engine", required=True)
     parser.add_argument("--shape", required=True, help="Example: input0:1x3x256x320")
-    parser.add_argument("--warmup-ms", type=int, default=200)
-    parser.add_argument("--iterations", type=int, default=50)
-    parser.add_argument("--trtexec", default="trtexec")
+    parser.add_argument("--warmup-iters", type=int, default=10)
+    parser.add_argument("--iters", type=int, default=50)
     parser.add_argument("--output")
     return parser.parse_args()
 
 
-def find_trtexec(binary_name):
-    resolved = shutil.which(binary_name)
-    if resolved:
-        return resolved
-    for candidate in ("/usr/src/tensorrt/bin/trtexec", "/usr/local/tensorrt/bin/trtexec", "/usr/local/bin/trtexec"):
-        if Path(candidate).is_file():
-            return candidate
-    raise FileNotFoundError(
-        f"Could not find trtexec ({binary_name}). Install TensorRT or pass --trtexec with a full path."
-    )
+def load_tensorrt_and_cuda():
+    try:
+        import tensorrt as trt
+    except ImportError as error:
+        raise RuntimeError("TensorRT Python package is required for this step.") from error
+    try:
+        import pycuda.autoinit  # noqa: F401
+        import pycuda.driver as cuda
+    except ImportError as error:
+        raise RuntimeError("pycuda is required for TensorRT engine execution benchmark.") from error
+    return trt, cuda
 
 
-def parse_metrics(text):
-    mean_ms = None
-    for pattern in _MEAN_PATTERNS:
-        match = pattern.search(text)
-        if match:
-            mean_ms = float(match.group(1))
-            break
-    throughput = None
-    for pattern in _THROUGHPUT_PATTERNS:
-        match = pattern.search(text)
-        if match:
-            throughput = float(match.group(1))
-            break
-    if mean_ms is None:
-        raise RuntimeError("Could not parse mean latency from trtexec output.")
+def parse_shape(text):
+    name, dims = str(text).split(":", 1)
+    return name, tuple(int(v) for v in dims.split("x"))
+
+
+def load_engine(trt, engine_path):
+    logger = trt.Logger(trt.Logger.WARNING)
+    runtime = trt.Runtime(logger)
+    engine = runtime.deserialize_cuda_engine(Path(engine_path).read_bytes())
+    if engine is None:
+        raise RuntimeError(f"Failed to deserialize TensorRT engine: {engine_path}")
+    return engine
+
+
+def create_execution(engine, input_name, shape, cuda):
+    context = engine.create_execution_context()
+    if hasattr(context, "set_input_shape"):
+        context.set_input_shape(input_name, shape)
+    else:
+        index = engine.get_binding_index(input_name)
+        context.set_binding_shape(index, shape)
+
+    tensor_names = [engine.get_tensor_name(i) for i in range(engine.num_io_tensors)] if hasattr(engine, "num_io_tensors") else []
+    if tensor_names:
+        output_names = [name for name in tensor_names if engine.get_tensor_mode(name) == engine.TensorIOMode.OUTPUT]
+        input_dtype = np.float32
+        input_size = int(np.prod(shape))
+        host_input = np.random.randn(*shape).astype(input_dtype)
+        d_input = cuda.mem_alloc(host_input.nbytes)
+        output_buffers = {}
+        bindings = {}
+        for name in output_names:
+            out_shape = tuple(int(v) for v in context.get_tensor_shape(name))
+            host_out = np.empty(out_shape, dtype=np.float32)
+            d_out = cuda.mem_alloc(host_out.nbytes)
+            output_buffers[name] = (host_out, d_out)
+            bindings[name] = int(d_out)
+        bindings[input_name] = int(d_input)
+        return {
+            "context": context,
+            "host_input": host_input,
+            "d_input": d_input,
+            "output_buffers": output_buffers,
+            "bindings": bindings,
+            "tensor_api": True,
+        }
+
+    index = engine.get_binding_index(input_name)
+    context.set_binding_shape(index, shape)
+    host_input = np.random.randn(*shape).astype(np.float32)
+    d_input = cuda.mem_alloc(host_input.nbytes)
+    bindings = [None] * engine.num_bindings
+    bindings[index] = int(d_input)
+    output_buffers = {}
+    for binding_index in range(engine.num_bindings):
+        if engine.binding_is_input(binding_index):
+            continue
+        out_shape = tuple(int(v) for v in context.get_binding_shape(binding_index))
+        host_out = np.empty(out_shape, dtype=np.float32)
+        d_out = cuda.mem_alloc(host_out.nbytes)
+        bindings[binding_index] = int(d_out)
+        output_buffers[binding_index] = (host_out, d_out)
     return {
-        "avg_ms": mean_ms,
-        "fps": throughput if throughput is not None else (1000.0 / mean_ms if mean_ms > 0 else float("nan")),
+        "context": context,
+        "host_input": host_input,
+        "d_input": d_input,
+        "output_buffers": output_buffers,
+        "bindings": bindings,
+        "tensor_api": False,
+        "input_index": index,
     }
 
 
-def run_one(trtexec, engine_path, shape_text, warmup_ms, iterations):
-    command = [
-        trtexec,
-        f"--loadEngine={engine_path}",
-        f"--shapes={shape_text}",
-        f"--warmUp={int(warmup_ms)}",
-        f"--iterations={int(iterations)}",
-        "--duration=0",
-        "--noDataTransfers",
-        "--useSpinWait",
-    ]
-    proc = subprocess.run(command, text=True, capture_output=True)
-    combined = (proc.stdout or "") + "\n" + (proc.stderr or "")
-    if proc.returncode != 0:
-        raise subprocess.CalledProcessError(proc.returncode, command, output=proc.stdout, stderr=proc.stderr)
-    metrics = parse_metrics(combined)
-    metrics["engine"] = str(engine_path)
-    return metrics
+def run_once(state, input_name, cuda):
+    cuda.memcpy_htod(state["d_input"], state["host_input"])
+    if state["tensor_api"]:
+        for name, ptr in state["bindings"].items():
+            state["context"].set_tensor_address(name, ptr)
+        ok = state["context"].execute_async_v3(0)
+    else:
+        ok = state["context"].execute_v2(state["bindings"])
+    if not ok:
+        raise RuntimeError("TensorRT execution failed.")
+
+
+def benchmark(engine_path, input_name, shape, warmup_iters, iters, trt, cuda):
+    engine = load_engine(trt, engine_path)
+    state = create_execution(engine, input_name, shape, cuda)
+    for _ in range(warmup_iters):
+        run_once(state, input_name, cuda)
+    timings = []
+    for _ in range(iters):
+        t0 = time.perf_counter()
+        run_once(state, input_name, cuda)
+        timings.append((time.perf_counter() - t0) * 1000.0)
+    avg_ms = sum(timings) / len(timings)
+    return {"engine": str(engine_path), "avg_ms": avg_ms, "fps": 1000.0 / avg_ms if avg_ms > 0 else float("nan")}
 
 
 def main():
+    trt, cuda = load_tensorrt_and_cuda()
     args = parse_args()
-    trtexec = find_trtexec(args.trtexec)
-    fp32 = run_one(trtexec, Path(args.fp32_engine), args.shape, args.warmup_ms, args.iterations)
-    int8 = run_one(trtexec, Path(args.int8_engine), args.shape, args.warmup_ms, args.iterations)
+    input_name, shape = parse_shape(args.shape)
+    fp32 = benchmark(args.fp32_engine, input_name, shape, args.warmup_iters, args.iters, trt, cuda)
+    int8 = benchmark(args.int8_engine, input_name, shape, args.warmup_iters, args.iters, trt, cuda)
     result = {
         "fp32": fp32,
         "int8": int8,
         "speedup_int8_vs_fp32": fp32["avg_ms"] / int8["avg_ms"],
         "shape": args.shape,
-        "warmup_ms": int(args.warmup_ms),
-        "iterations": int(args.iterations),
+        "warmup_iters": int(args.warmup_iters),
+        "iters": int(args.iters),
     }
     print(json.dumps(result, indent=2), flush=True)
     if args.output:
