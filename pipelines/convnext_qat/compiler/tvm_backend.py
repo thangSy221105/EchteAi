@@ -78,14 +78,33 @@ def export_module_for_relax(module, sample):
 
 
 def _compile_relax(frontend_torch, relax, module, sample, target):
-    exported_program = export_module_for_relax(module, sample)
+    imported = None
+    export_error = None
 
     if hasattr(frontend_torch, "from_exported_program"):
-        imported = frontend_torch.from_exported_program(exported_program)
-    elif hasattr(frontend_torch, "from_fx"):
-        gm = torch.fx.symbolic_trace(module.cpu().eval())
-        imported = frontend_torch.from_fx(gm, [sample.cpu()])
-    else:
+        try:
+            exported_program = export_module_for_relax(module, sample)
+            imported = frontend_torch.from_exported_program(exported_program)
+        except Exception as error:
+            export_error = error
+
+    if imported is None and hasattr(frontend_torch, "from_fx"):
+        try:
+            gm = torch.fx.symbolic_trace(module.cpu().eval())
+            imported = frontend_torch.from_fx(gm, [sample.cpu()])
+        except Exception as fx_error:
+            if export_error is not None:
+                raise RuntimeError(
+                    "TVM Relax could not import this model through either torch.export or FX tracing. "
+                    "This commonly happens for eager quantized modules with packed parameters."
+                ) from fx_error
+            raise
+
+    if imported is None:
+        if export_error is not None:
+            raise RuntimeError(
+                "TVM Relax frontend exposed from_exported_program, but import failed and no FX fallback was available."
+            ) from export_error
         raise RuntimeError(
             "Relax frontend torch module does not expose from_exported_program or from_fx; "
             "cannot import this PyTorch module into TVM Relax."
