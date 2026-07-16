@@ -22,6 +22,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from pipelines.convnext_qat.checkpoint import load_checkpoint
 from pipelines.convnext_qat.compiler import build_compiler_target_module, resolve_compiler_scope
+from pipelines.convnext_qat.compiler import describe_tvm_output_shape
 from pipelines.convnext_qat.config import load_config, quantized_modules_for_variant
 from pipelines.convnext_qat.models import build_fasterrcnn_convnext
 from pipelines.convnext_qat.quantization import (
@@ -40,6 +41,7 @@ def parse_args():
     parser.add_argument("--fp32-checkpoint")
     parser.add_argument("--int8-checkpoint")
     parser.add_argument("--artifact-dir")
+    parser.add_argument("--force-w8a8", action="store_true")
     parser.add_argument("--model", choices=["fp32", "int8"], default="fp32")
     parser.add_argument("--format", choices=["torch_export", "state_dict"], default="torch_export")
     return parser.parse_args()
@@ -84,7 +86,7 @@ def main():
             "quantized_modules",
             quantized_modules_for_variant(config, variant),
         )
-        mixed_precision_policy = metadata.get("mixed_precision_policy") or mixed_precision_policy_from_config(config)
+        mixed_precision_policy = None if args.force_w8a8 else (metadata.get("mixed_precision_policy") or mixed_precision_policy_from_config(config))
         module_qconfig_map = None
         if mixed_precision_policy is not None:
             if policy_has_non_int8_weights(mixed_precision_policy):
@@ -121,8 +123,9 @@ def main():
         "example_height": height,
         "example_width": width,
         "output_count": len(outputs),
-        "output_shapes": [list(tensor.shape) for tensor in outputs],
+        "output_shapes": [describe_tvm_output_shape(tensor) for tensor in outputs],
         "checkpoint_extra": payload.get("extra", {}) if isinstance(payload, dict) else {},
+        "force_w8a8": bool(args.force_w8a8),
     }
 
     if args.model == "int8" and args.format == "torch_export":

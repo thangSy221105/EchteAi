@@ -40,6 +40,7 @@ def parse_args():
     parser.add_argument("--warmup-iters", type=int, default=10)
     parser.add_argument("--iters", type=int, default=50)
     parser.add_argument("--threads", type=int, default=1)
+    parser.add_argument("--force-w8a8", action="store_true")
     parser.add_argument("--output")
     return parser.parse_args()
 
@@ -72,7 +73,7 @@ def load_fp32_model(config, checkpoint):
     return model
 
 
-def load_int8_model(config, checkpoint):
+def load_int8_model(config, checkpoint, force_w8a8=False):
     if not checkpoint or not Path(checkpoint).is_file():
         return None, None
     print(f"Loading INT8 checkpoint: {checkpoint}", flush=True)
@@ -86,7 +87,7 @@ def load_int8_model(config, checkpoint):
         quantized_modules_for_variant(config, variant),
     )
 
-    mixed_precision_policy = metadata.get("mixed_precision_policy") or mixed_precision_policy_from_config(config)
+    mixed_precision_policy = None if force_w8a8 else (metadata.get("mixed_precision_policy") or mixed_precision_policy_from_config(config))
     module_qconfig_map = None
     if mixed_precision_policy is not None:
         if policy_has_non_int8_weights(mixed_precision_policy):
@@ -137,12 +138,13 @@ def main():
     }
 
     int8_checkpoint = args.int8_checkpoint or compiler_cfg.get("int8_reference_checkpoint")
-    int8_model, int8_metadata = load_int8_model(config, int8_checkpoint)
+    int8_model, int8_metadata = load_int8_model(config, int8_checkpoint, force_w8a8=args.force_w8a8)
     if int8_model is not None:
         int8_target = build_compiler_target_module(int8_model, config).cpu().eval()
         result["int8_eager_reference"] = benchmark(int8_target, sample, args.warmup_iters, args.iters)
         result["int8_eager_reference"]["checkpoint"] = str(int8_checkpoint)
         result["int8_eager_reference"]["metadata"] = int8_metadata
+        result["int8_eager_reference"]["force_w8a8"] = bool(args.force_w8a8)
         result["speedup_int8_vs_fp32"] = (
             result["fp32_pytorch"]["avg_ms"] / result["int8_eager_reference"]["avg_ms"]
         )

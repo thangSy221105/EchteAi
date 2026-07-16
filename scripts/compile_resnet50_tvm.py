@@ -43,13 +43,14 @@ def parse_args():
     parser.add_argument("--fp32-checkpoint")
     parser.add_argument("--int8-checkpoint")
     parser.add_argument("--artifact-dir")
+    parser.add_argument("--force-w8a8", action="store_true")
     parser.add_argument("--target", default="llvm")
     parser.add_argument("--input-name", default="input0")
     parser.add_argument("--opt-level", type=int, default=3)
     return parser.parse_args()
 
 
-def load_model_for_compile(config, model_kind, fp32_checkpoint=None, int8_checkpoint=None):
+def load_model_for_compile(config, model_kind, fp32_checkpoint=None, int8_checkpoint=None, force_w8a8=False):
     model = build_fasterrcnn_convnext(config).cpu().eval()
     compiler_cfg = config.get("quantization", {}).get("compiler", {})
     if model_kind == "fp32":
@@ -74,7 +75,7 @@ def load_model_for_compile(config, model_kind, fp32_checkpoint=None, int8_checkp
         "quantized_modules",
         quantized_modules_for_variant(config, variant),
     )
-    mixed_precision_policy = metadata.get("mixed_precision_policy") or mixed_precision_policy_from_config(config)
+    mixed_precision_policy = None if force_w8a8 else (metadata.get("mixed_precision_policy") or mixed_precision_policy_from_config(config))
     module_qconfig_map = None
     if mixed_precision_policy is not None:
         if policy_has_non_int8_weights(mixed_precision_policy):
@@ -120,6 +121,7 @@ def main():
         args.model,
         fp32_checkpoint=args.fp32_checkpoint,
         int8_checkpoint=args.int8_checkpoint,
+        force_w8a8=args.force_w8a8,
     )
     target_module = build_compiler_target_module(model, config).cpu().eval()
     sample = torch.randn(batch_size, 3, height, width)
@@ -141,6 +143,7 @@ def main():
         "input_name": args.input_name,
         "example_shape": list(sample.shape),
         "checkpoint_extra": payload.get("extra", {}) if isinstance(payload, dict) else {},
+        "force_w8a8": bool(args.force_w8a8),
     }
     lib_path, metadata_path = save_tvm_artifact(artifact_dir, compiled, metadata, artifact_name)
 
