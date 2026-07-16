@@ -7,6 +7,7 @@ import argparse
 import json
 import sys
 import time
+import warnings
 from pathlib import Path
 
 import torch
@@ -16,14 +17,23 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from pipelines.convnext_qat.checkpoint import load_checkpoint
 from pipelines.convnext_qat.compiler import build_compiler_target_module, resolve_compiler_scope
-from pipelines.convnext_qat.config import load_config
+from pipelines.convnext_qat.config import load_config, quantized_modules_for_variant
 from pipelines.convnext_qat.models import build_fasterrcnn_convnext
+from pipelines.convnext_qat.quantization import (
+    convert_selective_qat,
+    mixed_precision_policy_from_config,
+    module_qconfig_map_from_policy,
+    policy_has_non_int8_weights,
+    policy_scope_to_quantized_modules,
+    prepare_selective_qat,
+)
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/seadronessee_colab.yaml")
     parser.add_argument("--fp32-checkpoint")
+    parser.add_argument("--int8-checkpoint")
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--height", type=int)
     parser.add_argument("--width", type=int)
@@ -52,6 +62,56 @@ def benchmark(module, sample, warmup_iters, iters):
     }
 
 
+def load_fp32_model(config, checkpoint):
+    model = build_fasterrcnn_convnext(config).cpu().eval()
+    if checkpoint and Path(checkpoint).is_file():
+        print(f"Loading FP32 checkpoint: {checkpoint}", flush=True)
+        load_checkpoint(checkpoint, model, map_location="cpu", strict=True)
+    else:
+        print("No FP32 checkpoint loaded; benchmarking current model weights.", flush=True)
+    return model
+
+
+def load_int8_model(config, checkpoint):
+    if not checkpoint or not Path(checkpoint).is_file():
+        return None, None
+    print(f"Loading INT8 checkpoint: {checkpoint}", flush=True)
+    model = build_fasterrcnn_convnext(config).cpu().eval()
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    metadata = payload.get("extra", {}) if isinstance(payload, dict) else {}
+    variant = str(metadata.get("variant", config["quantization"].get("variant", "M3"))).upper()
+    backend = metadata.get("backend", config["quantization"].get("backend", "x86"))
+    quantized_modules = metadata.get(
+        "quantized_modules",
+        quantized_modules_for_variant(config, variant),
+    )
+
+    mixed_precision_policy = metadata.get("mixed_precision_policy") or mixed_precision_policy_from_config(config)
+    module_qconfig_map = None
+    if mixed_precision_policy is not None:
+        if policy_has_non_int8_weights(mixed_precision_policy):
+            raise ValueError(
+                "INT8 compiler benchmark cannot load a mixed-precision policy containing sub-8-bit weights. "
+                "Provide a true W8A8 eager INT8 checkpoint."
+            )
+        quantized_modules = policy_scope_to_quantized_modules(mixed_precision_policy)
+        module_qconfig_map = module_qconfig_map_from_policy(mixed_precision_policy)
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="must run observer before calling calculate_qparams")
+        model = convert_selective_qat(
+            prepare_selective_qat(
+                model,
+                variant,
+                backend,
+                quantized_modules=quantized_modules,
+                module_qconfig_map=module_qconfig_map,
+            )
+        )
+    load_checkpoint(checkpoint, model, map_location="cpu", strict=True)
+    return model.cpu().eval(), metadata
+
+
 def main():
     args = parse_args()
     config = load_config(args.config, require_dataset=False)
@@ -63,16 +123,9 @@ def main():
     height = int(args.height or compiler_cfg.get("example_height", 256))
     width = int(args.width or compiler_cfg.get("example_width", 320))
 
-    model = build_fasterrcnn_convnext(config).cpu().eval()
-    checkpoint = args.fp32_checkpoint or config["output"].get("fp32_best")
-    if checkpoint and Path(checkpoint).is_file():
-        print(f"Loading checkpoint: {checkpoint}", flush=True)
-        load_checkpoint(checkpoint, model, map_location="cpu", strict=True)
-    else:
-        print("No checkpoint loaded; benchmarking current model weights.", flush=True)
-
-    target = build_compiler_target_module(model, config).cpu().eval()
     sample = torch.randn(batch_size, 3, height, width)
+    fp32_model = load_fp32_model(config, args.fp32_checkpoint or config["output"].get("fp32_best"))
+    fp32_target = build_compiler_target_module(fp32_model, config).cpu().eval()
     result = {
         "backbone": config["model"].get("backbone", "unknown"),
         "scope": scope,
@@ -80,8 +133,19 @@ def main():
         "height": height,
         "width": width,
         "threads": int(args.threads),
-        "fp32_pytorch": benchmark(target, sample, args.warmup_iters, args.iters),
+        "fp32_pytorch": benchmark(fp32_target, sample, args.warmup_iters, args.iters),
     }
+
+    int8_checkpoint = args.int8_checkpoint or compiler_cfg.get("int8_reference_checkpoint")
+    int8_model, int8_metadata = load_int8_model(config, int8_checkpoint)
+    if int8_model is not None:
+        int8_target = build_compiler_target_module(int8_model, config).cpu().eval()
+        result["int8_eager_reference"] = benchmark(int8_target, sample, args.warmup_iters, args.iters)
+        result["int8_eager_reference"]["checkpoint"] = str(int8_checkpoint)
+        result["int8_eager_reference"]["metadata"] = int8_metadata
+        result["speedup_int8_vs_fp32"] = (
+            result["fp32_pytorch"]["avg_ms"] / result["int8_eager_reference"]["avg_ms"]
+        )
     print(json.dumps(result, indent=2), flush=True)
 
     if args.output:

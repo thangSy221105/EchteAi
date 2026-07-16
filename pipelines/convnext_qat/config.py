@@ -30,7 +30,7 @@ def load_config(path, require_dataset=False):
     if policy_output and not Path(policy_output).is_absolute():
         mixed_precision["policy_output"] = str((root / policy_output).resolve())
     compiler = config.get("quantization", {}).get("compiler", {})
-    for key in ("artifact_dir", "benchmark_json"):
+    for key in ("artifact_dir", "benchmark_json", "int8_reference_checkpoint"):
         value = compiler.get(key)
         if value and not Path(value).is_absolute():
             compiler[key] = str((root / value).resolve())
