@@ -178,6 +178,8 @@ Thiết kế này cho phép đánh giá riêng tác động của quantization v
 
 Trong nhánh hiện tại, TensorRT chỉ được áp dụng cho phần backbone ResNet50, còn FPN, RPN và RoI Heads vẫn chạy trong PyTorch. Vì vậy đây là một kiến trúc `backbone-only hybrid`, không phải detector TensorRT end-to-end.
 
+TensorRT là bộ tối ưu suy luận của NVIDIA dành cho GPU. Nó không phải là một mô hình mới và cũng không tham gia vào quá trình huấn luyện. Vai trò của TensorRT là nhận mô hình đã train xong, tối ưu graph tính toán và build thành một engine để suy luận nhanh hơn khi triển khai. Trong nhánh hiện tại, TensorRT chỉ được áp dụng cho phần backbone ResNet50, còn các phần như FPN, RPN và RoI Heads vẫn chạy bằng PyTorch.
+
 Luồng xử lý của nhánh hybrid có thể mô tả như sau:
 
 ```mermaid
