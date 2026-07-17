@@ -1,306 +1,211 @@
-# EchteAI
+# SeaDronesSee ResNet50 Faster R-CNN Pipeline
 
-EchteAI là baseline phát hiện đối tượng trên SeaDronesSee được xây dựng quanh Faster R-CNN với backbone ConvNeXt-Tiny và FPN. Mục tiêu của repository này không phải là tạo ra một detector nhẹ tuyệt đối, mà là xây dựng một pipeline đủ mạnh ở FP32, sau đó áp dụng lượng tử hóa chọn lọc để khảo sát tradeoff giữa chất lượng và độ trễ khi triển khai INT8. Ở trạng thái hiện tại, nhánh ổn định nhất của repo là selective eager QAT; nhánh PT2E graph đã có trong code nhưng nhạy cảm hơn với môi trường.
+## 1. Giới thiệu
 
-## Minh họa nhanh
+Nhánh này triển khai bài toán phát hiện vật thể trên ảnh biển với kiến trúc Faster R-CNN sử dụng backbone ResNet50 kết hợp FPN. Mục tiêu của pipeline là xây dựng một baseline FP32 sạch, sau đó mở rộng sang Quantization-Aware Training (QAT) và triển khai tăng tốc theo hướng TensorRT cho riêng phần backbone.
 
-Ảnh ví dụ từ dataset SeaDronesSee:
+Khác với nhánh cũ, pipeline hiện tại tập trung vào cấu hình ResNet50 với đầu vào độ phân giải cao `1080x1920`, đồng thời rút gọn bài toán phân loại về `2 class`: `background` và `foreground`. Tất cả đối tượng hợp lệ trong dữ liệu được gom về cùng một lớp foreground để ưu tiên khả năng phát hiện có-vật-thể trong bối cảnh vật thể rất nhỏ, mật độ thấp và nền biển có nhiều nhiễu.
 
-![Ảnh ví dụ SeaDronesSee](./image_sea.png)
+## 2. Kiến trúc tổng thể
 
-GIF demo ngắn so sánh FP32 và INT8:
+Mô hình hiện tại sử dụng kiến trúc Faster R-CNN hai giai đoạn. Ảnh đầu vào được đưa qua backbone ResNet50 để trích xuất đặc trưng không gian. Các đặc trưng ở nhiều mức sâu khác nhau được tổng hợp bởi Feature Pyramid Network (FPN) nhằm tạo ra biểu diễn đa tỉ lệ phù hợp với bài toán vật thể nhỏ. Sau đó, Region Proposal Network (RPN) sinh các vùng đề xuất, và RoI Heads thực hiện phân loại cuối cùng cùng với hồi quy hộp giới hạn.
 
-![Demo FP32 vs INT8](./demo_fp32_vs_int8_ver3epoch.gif)
+Luồng xử lý có thể mô tả như sau:
 
-Video đầy đủ:
-
-[Tải video demo (.mp4)](./video_fp32_cpu_vs_int8_cpu_ver3epoch.mp4)
-
-## Tổng quan nhanh
-
-Ý chính của repo có thể tóm tắt ngắn gọn như sau:
-
-- Detector gốc là Faster R-CNN.
-- Backbone là ConvNeXt-Tiny, neck là FPN.
-- Baseline mạnh được huấn luyện ở FP32 trước.
-- Sau đó mô hình được fine-tune bằng selective eager QAT.
-- Cuối cùng checkpoint QAT được convert sang INT8 để benchmark và inference trên CPU.
-
-Nếu nhìn theo luồng xử lý mức cao, pipeline detector hiện tại là:
-
-`image -> transform -> ConvNeXt backbone -> FPN -> RPN -> proposals -> RoI Align -> RoI heads -> final detections`
-
-Kiến trúc chính của hệ thống được triển khai trong [fasterrcnn_convnext.py](D:/Quanti_FasterRCNN/EchteAI/pipelines/convnext_qat/models/fasterrcnn_convnext.py). Ảnh đầu vào trước hết đi qua khối transform của Faster R-CNN để resize và chuẩn hóa, sau đó được đưa qua ConvNeXt-Tiny để sinh ra đặc trưng đa mức `C2-C5`. Những đặc trưng này đi vào FPN để tạo `P2-P6`, rồi chuyển sang RPN để sinh proposal. Proposal tiếp tục đi qua RoI Align và RoI heads để cho ra dự đoán cuối cùng. Kiến trúc này được chọn vì SeaDronesSee có nhiều vật thể nhỏ, trong khi FPN giúp duy trì đặc trưng ở các mức phân giải cao và Faster R-CNN thường cho baseline ổn định hơn so với việc bắt đầu ngay bằng một detector quá nhẹ.
-
-## Kiến trúc detector hiện tại
-
-Detector hiện tại có ba cụm thành phần chính. Cụm đầu tiên là backbone ConvNeXt-Tiny chịu trách nhiệm trích xuất đặc trưng. Cụm thứ hai là FPN và RPN, nơi đặc trưng được tái tổ chức theo tháp đặc trưng và dùng để sinh proposal. Cụm thứ ba là RoI stage, nơi proposal được cắt đặc trưng bằng RoI Align rồi đưa vào head phân loại và hồi quy hộp giới hạn. Mặc dù đây là một detector hai giai đoạn tương đối nặng, nó có lợi thế rõ ràng trong bài toán nghiên cứu vì dễ đọc, dễ phân tích và các thành phần như anchor, proposal hay loss đều có thể can thiệp một cách có kiểm soát.
-
-Một điểm quan trọng trong kiến trúc này là anchor không bị cố định cứng theo giá trị mặc định của torchvision. Repo hỗ trợ `model.anchor_sizes: auto`, tức là quét annotation huấn luyện, lấy thống kê kích thước đối tượng sau khi resize, rồi tự suy ra năm anchor scales tương ứng với các mức `P2-P6`. Với bài toán vật thể nhỏ, việc để anchor lệch xa phân bố thật của dữ liệu thường làm recall của RPN yếu ngay từ đầu, vì vậy khâu fit anchor là một phần rất quan trọng của baseline.
-
-## Thiết kế hàm loss
-
-Thiết kế loss là phần khác biệt quan trọng của repo này so với Faster R-CNN mặc định. Ý tưởng chung là giữ phần hồi quy hộp giới hạn theo hướng tiêu chuẩn để đảm bảo ổn định, nhưng thay loss phân loại bằng focal loss để giảm tác động của các mẫu quá dễ, đặc biệt là nền âm tính áp đảo. Với bài toán drone hoặc hàng hải, số lượng background dễ thường cực lớn so với số foreground thật, nên focal loss giúp quá trình học tập trung hơn vào những proposal hoặc anchor khó.
-
-### Loss ở RPN
-
-Trong nhánh RPN, phần objectness dùng sigmoid focal loss. Nếu ký hiệu `x` là logit dự đoán objectness, `y ∈ {0,1}` là nhãn thật, `p = sigmoid(x)`, còn `p_t = p` khi `y = 1` và `p_t = 1 - p` khi `y = 0`, thì focal loss được dùng trong code có dạng:
-
-```text
-FL(x, y) = alpha_t * (1 - p_t)^gamma * BCEWithLogits(x, y)
+```mermaid
+flowchart LR
+    A["Ảnh đầu vào 1080x1920"] --> B["ResNet50 backbone"]
+    B --> C["FPN: đặc trưng đa tỉ lệ"]
+    C --> D["RPN: sinh proposal"]
+    D --> E["RoI Align + RoI Heads"]
+    E --> F["Phân loại foreground/background"]
+    E --> G["Hồi quy bounding box"]
 ```
 
-Ở đây `gamma = 2.0` theo mặc định, còn `alpha` hiện tại để `None`, tức là không thêm foreground/background reweighting ngoài thành phần focal modulation. Khi `alpha = None`, thành phần `alpha_t` được xem như bằng `1`, vì vậy loss chủ yếu tác động bằng cách giảm trọng số của các mẫu có `p_t` đã cao, tức là các mẫu đã được phân loại rất dễ.
+## 3. Thiết kế backbone ResNet50-FPN
 
-Song song với objectness, phần hồi quy hộp giới hạn của RPN vẫn dùng Smooth L1 loss với `beta = 1/9`. Nếu `d` là độ lệch giữa dự đoán và regression target, Smooth L1 có thể viết gọn như sau:
+Backbone của mô hình là `ResNet50` pretrained, sau đó được gắn với FPN để tạo ra đặc trưng đa tỉ lệ. Trong cấu hình hiện tại:
 
-```text
-SmoothL1(d) = 0.5 * d^2 / beta      nếu |d| < beta
-              |d| - 0.5 * beta      nếu |d| >= beta
-```
+- `backbone = resnet50`
+- `trainable_backbone_layers = 5`
+- `fpn_out_channels = 256`
 
-Loss hồi quy này chỉ áp dụng trên positive anchors, vì negative anchors không có target bounding box có ý nghĩa. Về mặt ý nghĩa, thiết kế ở RPN đang giải quyết đồng thời hai việc khác nhau: phân biệt foreground và background trong một không gian cực mất cân bằng bằng focal loss, đồng thời tinh chỉnh proposal bằng một loss ổn định hơn là Smooth L1.
+Giá trị `trainable_backbone_layers = 5` có nghĩa là toàn bộ backbone ResNet50 được fine-tune, không đóng băng các stage chính. Đây là cấu hình full fine-tune của backbone, phù hợp khi dữ liệu đích khác đáng kể so với dữ liệu tiền huấn luyện.
 
-### Loss ở RoI head
+FPN đóng vai trò quan trọng trong bài toán này vì vật thể trên mặt biển thường rất nhỏ so với khung hình. Nếu chỉ dùng đặc trưng sâu ở một mức duy nhất, nhiều chi tiết nhỏ sẽ bị mất. Việc tổng hợp đặc trưng theo nhiều scale giúp detector vừa giữ được chi tiết cục bộ, vừa có đủ ngữ cảnh để phân biệt vật thể với nền sóng, bọt nước và phản xạ ánh sáng.
 
-Ở RoI stage, repo thay cross-entropy mặc định bằng softmax focal loss. Nếu `CE(z, y)` là cross-entropy giữa vector class logits `z` và nhãn thật `y`, còn `p_t = exp(-CE(z, y))`, thì loss phân loại có dạng:
+## 4. Cấu hình đầu vào và anchor box
 
-```text
-FL_softmax(z, y) = (1 - p_t)^gamma * CE(z, y)
-```
+Pipeline hiện tại làm việc ở độ phân giải cao:
 
-Nếu `alpha` được bật thì code còn nhân thêm một hệ số theo foreground/background, nhưng trong cấu hình hiện tại `alpha` đang để `None`, nên loss tập trung vào thành phần điều chế theo `gamma`. Điều này có nghĩa là ngay cả sau khi đã qua RPN, RoI stage vẫn không học như nhau trên mọi mẫu, mà ưu tiên nhiều hơn cho các mẫu khó và các trường hợp dễ nhầm lẫn.
+- `min_size = 1080`
+- `train_min_sizes = [1080]`
+- `max_size = 1920`
 
-Tương tự RPN, phần hồi quy bounding box ở RoI head vẫn dùng Smooth L1 với `beta = 1/9`. Trong code, regression loss được tính trên các RoI dương và sau đó chuẩn hóa theo số lượng mẫu hợp lệ. Cách thiết kế này giúp phần classification trở nên nhạy hơn với hard example, còn phần localization vẫn giữ tính ổn định và ít dao động hơn trong huấn luyện.
+Đây là lựa chọn có chủ đích để giữ lại tối đa chi tiết của vật thể nhỏ. Trong các cảnh biển, đối tượng như người bơi, phao hay thiết bị cứu sinh có thể chỉ chiếm một vùng rất nhỏ của ảnh; nếu resize xuống quá thấp thì tín hiệu sẽ suy giảm mạnh.
 
-### Cách áp dụng loss trong pipeline
+Một điểm khác biệt quan trọng của nhánh này là anchor box không dùng bộ cố định mặc định. Thay vào đó, anchor được suy ra tự động từ thống kê bounding box của tập huấn luyện sau khi resize theo đúng cấu hình detector hiện tại. Với nhánh ResNet50 này, hệ thống đang sinh ra bộ anchor điển hình:
 
-Repo không thay toàn bộ kiến trúc Faster R-CNN, mà cài focal loss bằng cách thay lớp RPN và lớp RoI heads mặc định bằng `FocalRegionProposalNetwork` và `FocalRoIHeads`. Điều đó có nghĩa là backbone, FPN, proposal flow, RoI Align và toàn bộ control flow của detector vẫn được giữ nguyên; chỉ đúng hai điểm phát sinh loss classification được thay cách tính. Đây là một thiết kế thực dụng: thay đổi đủ nhiều để phù hợp hơn với bài toán vật thể nhỏ, nhưng không phá cấu trúc ổn định của detector gốc.
+- `[9, 17, 29, 52, 118]`
 
-## Pipeline huấn luyện và lượng tử hóa
+Cách tiếp cận này giúp anchor bám sát phân bố kích thước vật thể thực tế trong dữ liệu hơn so với bộ anchor chuẩn kiểu `(32, 64, 128, 256, 512)`.
 
-Pipeline hoạt động của repo có thể chia thành ba giai đoạn.
+## 5. Thiết kế bài toán 2 class
 
-- Giai đoạn thứ nhất là huấn luyện baseline FP32 bằng [train_fp32.py](D:/Quanti_FasterRCNN/EchteAI/scripts/train_fp32.py). Ở bước này mô hình được train hoàn toàn ở FP32, sau mỗi epoch sẽ evaluate trên validation set và lưu `fp32_last.pt` cùng `fp32_best.pt`.
-- Giai đoạn thứ hai là selective QAT bằng [train_qat.py](D:/Quanti_FasterRCNN/EchteAI/scripts/train_qat.py) hoặc [train_qat_ddp.py](D:/Quanti_FasterRCNN/EchteAI/scripts/train_qat_ddp.py) nếu chạy nhiều GPU. Bước này load checkpoint FP32 tốt nhất, chèn fake-quant vào các vùng được chọn, thực hiện observer warmup rồi đi qua các phase `weight_only`, `full` và `frozen`.
-- Giai đoạn cuối là convert checkpoint QAT tốt nhất ở phase frozen sang checkpoint INT8 thật `selective_int8.pt`, sau đó dùng [evaluate.py](D:/Quanti_FasterRCNN/EchteAI/scripts/evaluate.py), [compare_fp32_int8.py](D:/Quanti_FasterRCNN/EchteAI/scripts/compare_fp32_int8.py), [visualize_fp32_int8.py](D:/Quanti_FasterRCNN/EchteAI/scripts/visualize_fp32_int8.py) hoặc [infer_video_fp32_int8.py](D:/Quanti_FasterRCNN/EchteAI/scripts/infer_video_fp32_int8.py) để phân tích.
+Thay vì giữ nguyên toàn bộ lớp gốc của SeaDronesSee, pipeline hiện tại sử dụng:
 
-Điểm cần nhấn mạnh là nhánh selective QAT trong repo hiện nay mang mục tiêu rất rõ: tạo ra một baseline INT8 đủ dễ chạy, chứ không phải một hệ thống graph quantization tối ưu end-to-end ngay từ đầu. Đây là lý do phần convert cuối cùng tập trung vào checkpoint INT8 phục vụ benchmark và inference trên CPU.
+- `background`
+- `foreground`
 
-## Kiến trúc eager island
+Điều này được thực hiện thông qua cơ chế `binary_collapse_foreground`, trong đó mọi lớp vật thể hợp lệ đều được ánh xạ về cùng một nhãn foreground.
 
-Selective QAT hiện tại được triển khai theo kiểu eager island trong [selective_qat.py](D:/Quanti_FasterRCNN/EchteAI/pipelines/convnext_qat/quantization/selective_qat.py). Thay vì biến cả detector thành một graph INT8 liền mạch, code bọc từng `Conv2d` hoặc `Linear` trong vùng được chọn bằng một lớp `QuantizedOperation`, bên trong gồm `QuantStub`, phép toán gốc rồi `DeQuantStub`.
+Mục đích của thiết kế này là giảm độ khó của đầu ra phân loại, để mô hình tập trung trước tiên vào câu hỏi quan trọng nhất: vùng nào thực sự chứa vật thể. Đây là hướng phù hợp khi mục tiêu chính là phát hiện mục tiêu nhỏ trong môi trường nền phức tạp. Tuy nhiên, cách gom lớp này cũng có nhược điểm: mô hình dễ học theo kiểu “có gì đó giống vật thể” mà không cần phân biệt loại vật thể, nên nếu chưa được huấn luyện đủ ổn định thì false positive có thể tăng.
 
-Nếu nhìn một island riêng lẻ, luồng dữ liệu có dạng:
+## 6. RPN và cơ chế sinh proposal
 
-```text
-Tensor FP32
-   ->
-QuantStub
-   ->
-Tensor đã lượng tử hóa
-   ->
-Conv/Linear lượng tử hóa
-   ->
-DeQuantStub
-   ->
-Tensor FP32
-```
+RPN hoạt động trên đặc trưng FPN để sinh các vùng ứng viên. Ở nhánh hiện tại, các proposal được giữ tương đối nhiều để ưu tiên recall cho vật thể nhỏ. Cấu hình chính gồm:
 
-Nếu nhìn ở mức toàn detector, pipeline eager hiện tại có thể hình dung như sau:
+- `rpn_pre_nms_top_n_train = 2000`
+- `rpn_pre_nms_top_n_test = 1000`
+- `rpn_post_nms_top_n_test = 1000`
 
-```text
-Ảnh đầu vào FP32
-   ->
-Transform / Resize / Normalize (FP32)
-   ->
-Backbone ConvNeXt
-   -> [nhiều INT8 island nhỏ nằm trong các Conv]
-FPN
-   -> [nhiều INT8 island nhỏ nằm trong các Conv]
-RPN
-   -> [một phần conv / cls được lượng tử hóa]
-Proposal decode + NMS (FP32)
-   ->
-RoI Align (FP32)
-   ->
-RoI heads (FP32)
-   ->
-Final decode + NMS (FP32)
-   ->
-Detections
-```
+Thiết kế này giúp hạn chế việc bỏ sót vật thể nhỏ ở giai đoạn đầu, nhưng đồng thời cũng làm tăng số proposal nhiễu nếu confidence của mô hình chưa đủ sạch. Vì vậy, hiệu quả cuối cùng phụ thuộc nhiều vào chất lượng của nhánh phân loại và hồi quy ở RoI Heads.
 
-Cách hoạt động thực sự của eager island là như sau. Ở giai đoạn QAT, mỗi island được gắn fake-quant observer để mô phỏng tác động của lượng tử hóa lên activation và weight. Khi convert, từng island được thay bằng quantized operator thật trên CPU. Tuy nhiên dữ liệu không nằm mãi trong không gian INT8. Nó liên tục đi từ FP32 sang INT8 rồi quay lại FP32 ở ranh giới của từng island. Chính ranh giới này làm eager dễ triển khai hơn graph quantization, nhưng cũng là gốc của nhược điểm về hiệu năng.
+## 7. Thiết kế hàm loss
 
-Điểm thường gây thắc mắc là tại sao không lượng tử hóa một lần ở đầu block rồi để tensor đi qua toàn bộ chuỗi phép toán ở dạng INT8. Lý do là eager selective quantization trong repo này chỉ bọc trực tiếp các phép toán được hỗ trợ tốt, chủ yếu là `Conv2d` và `Linear`. Trong một block thực tế của ConvNeXt hoặc FPN, giữa các phép tích chập còn có những phép như `LayerNorm`, `GELU`, cộng tắt residual, reshape hoặc tái tổ chức đặc trưng. Những phép này không phải lúc nào cũng được giữ liền mạch trong cùng miền INT8 ở nhánh eager hiện tại. Vì vậy cách triển khai an toàn là chỉ quantize ngay trước phép toán hỗ trợ, thực thi phép toán đó ở INT8, rồi dequantize trở lại FP32 để phần còn lại của block tiếp tục chạy bình thường. Nói cách khác, eager baseline hiện tại hoạt động theo logic “quantize ngay trước op hỗ trợ” chứ không phải “giữ cả block trong INT8 từ đầu đến cuối”.
+### 7.1. Tổng loss của mô hình
 
-Nếu nhìn ở mức một block ConvNeXt hoặc một đoạn conv trong FPN, có thể hình dung rõ hơn như sau:
+Tổng loss của detector được xây dựng từ bốn thành phần:
 
-```text
-Tensor FP32
-   ->
-LayerNorm / Permute / GELU / Residual add (FP32)
-   ->
-QuantStub
-   ->
-Conv hoặc Linear được hỗ trợ INT8
-   ->
-DeQuantStub
-   ->
-Các phép còn lại của block quay về FP32
-   ->
-QuantStub
-   ->
-Conv tiếp theo được hỗ trợ INT8
-   ->
-DeQuantStub
-   ->
-Output FP32
-```
+\[
+L = L_{rpn\_cls} + L_{rpn\_box} + L_{roi\_cls} + L_{roi\_box}
+\]
 
-Sơ đồ này cho thấy một điều rất quan trọng: không phải “mỗi tensor chỉ chứa vài frame” hay chỉ có một island cho cả block. Thực tế là trong cùng một block có thể có nhiều phép toán khác loại nối tiếp nhau. Chỉ những op nào khớp điều kiện hỗ trợ của backend mới được bọc thành island INT8. Các op còn lại vẫn chạy ở FP32, nên dữ liệu phải liên tục qua lại giữa hai miền số học. Đây là lý do số island thường nhiều hơn trực giác ban đầu.
+Trong đó:
 
-Nhược điểm lớn nhất của eager island là overhead quantize/dequantize lặp lại rất nhiều lần. Với một detector hai giai đoạn như Faster R-CNN, backbone chỉ là một phần của tổng latency, còn các phần như proposal decode, NMS, RoI Align, RoI heads và final postprocess vẫn ở FP32. Vì vậy dù trọng số của một số phần đã được nén xuống INT8, độ trễ end-to-end chưa chắc giảm tương xứng. Một nhược điểm khác là score distribution sau lượng tử hóa có thể bị lệch, kéo theo recall và AP giảm khá mạnh, đặc biệt trong bài toán vật thể nhỏ nơi chỉ một sai lệch nhỏ về activation range cũng có thể làm confidence tụt đáng kể.
+- \(L_{rpn\_cls}\): loss phân loại objectness của RPN
+- \(L_{rpn\_box}\): loss hồi quy bbox của RPN
+- \(L_{roi\_cls}\): loss phân loại ở RoI Heads
+- \(L_{roi\_box}\): loss hồi quy bbox cuối cùng ở RoI Heads
 
-Nói ngắn gọn, eager island là một baseline nghiên cứu tốt vì dễ kiểm soát và dễ tách ablation. Nhưng nếu mục tiêu là tối ưu latency thật sự, kiến trúc này thường chạm trần sớm hơn graph quantization vì không giữ được một đoạn INT8 liền mạch đủ dài.
+Nhánh hiện tại không giữ nguyên cross-entropy mặc định của Faster R-CNN cho phần classification. Thay vào đó, loss phân loại đã được chuyển sang Focal Loss, còn phần hồi quy bbox vẫn dùng Smooth L1 Loss.
 
-## Kiến trúc graph dự kiến áp dụng tiếp theo
+### 7.2. Focal Loss cho phân loại
 
-Hướng tiếp theo của repo là chuyển phần lượng tử hóa từ eager island sang graph quantization, cụ thể là nhánh PT2E trong [train_pt2e_qat.py](D:/Quanti_FasterRCNN/EchteAI/scripts/train_pt2e_qat.py) và [pt2e_qat.py](D:/Quanti_FasterRCNN/EchteAI/pipelines/convnext_qat/quantization/pt2e_qat.py). Mục tiêu không phải đổi detector sang mô hình khác, mà vẫn giữ Faster R-CNN + ConvNeXt-Tiny + FPN, chỉ thay cách chèn quantization để backend nhìn thấy một graph lớn hơn và có cơ hội fuse hoặc giữ miền INT8 dài hơn.
+Focal Loss được sử dụng để giảm ảnh hưởng của các mẫu dễ và tập trung hơn vào các mẫu khó, đặc biệt hữu ích trong bối cảnh mất cân bằng mạnh giữa nền biển và vật thể nhỏ.
 
-Nếu eager hoạt động theo kiểu “đụng Conv nào thì bọc Conv đó”, thì graph quantization hoạt động theo kiểu “xuất graph tính toán, đánh dấu vùng có thể lượng tử hóa, rồi để hệ thống chèn fake-quant và convert theo cấu trúc graph”. Về mặt trực quan, pipeline mong muốn sẽ gần với dạng sau:
+#### a. Sigmoid Focal Loss ở RPN
 
-```text
-Ảnh đầu vào FP32
-   ->
-Transform / Resize / Normalize (FP32)
-   ->
-[Một đoạn graph backbone hoặc backbone+FPN được giữ liền mạch lâu hơn]
-   ->
-Quantize một lần ở đầu vùng
-   ->
-Nhiều op liên tiếp chạy trong cùng miền INT8
-   ->
-Dequantize ở cuối vùng
-   ->
-RPN / Proposal / RoI / Postprocess
-   ->
-Detections
-```
+Đối với nhánh objectness của RPN, loss có dạng:
 
-Nếu nhìn ở mức block, mục tiêu của graph branch là biến:
+\[
+FL(p_t) = \alpha_t (1 - p_t)^\gamma \cdot BCE
+\]
 
-```text
-FP32 -> Quant -> Conv -> DeQuant -> FP32 -> Quant -> Conv -> DeQuant -> FP32
-```
+Trong đó:
 
-thành gần hơn với:
+- \(BCE\) là binary cross entropy with logits
+- \(p_t\) là xác suất dự đoán đúng của mẫu hiện tại
+- \(\gamma\) là hệ số điều tiết mức tập trung vào mẫu khó
+- \(\alpha_t\) là hệ số cân bằng giữa positive và negative
 
-```text
-FP32 -> Quant -> Conv -> Act/Norm/Residual compatible path -> Conv -> ... -> DeQuant -> FP32
-```
+Ý nghĩa trực quan của công thức này là:
 
-Lợi ích kỳ vọng của cách này là giảm số lần quantize/dequantize trung gian, giảm memory traffic, và tăng cơ hội để backend tối ưu thực thi tốt hơn. Nếu làm đúng, graph branch thường có triển vọng latency tốt hơn eager branch, nhất là khi phần backbone chiếm tỷ trọng lớn trong compute. Đổi lại, nhánh này khó vận hành hơn vì phụ thuộc rất mạnh vào phiên bản PyTorch, TorchAO, backend quantization, khả năng export graph, và tập op thực sự được nhận diện trong runtime đang dùng. Đây cũng là lý do repo hiện tại vẫn xem eager selective QAT là baseline ổn định, còn PT2E graph là hướng nâng cấp tiếp theo để đẩy hiệu năng.
+- nếu mẫu đã được dự đoán đúng với xác suất cao, loss sẽ bị giảm mạnh
+- nếu mẫu khó hoặc bị dự đoán sai, loss vẫn giữ lớn để mô hình tiếp tục học
 
-## Dataset, anchor và dữ liệu đầu vào
+Với dữ liệu biển, số lượng vùng nền lớn hơn rất nhiều số vùng chứa vật thể. Nếu dùng BCE thông thường, các mẫu nền dễ sẽ chi phối quá mạnh quá trình tối ưu. Focal Loss giúp giảm hiệu ứng này.
 
-Pipeline kỳ vọng dataset ở định dạng COCO, với cấu trúc tối thiểu như sau:
+#### b. Softmax Focal Loss ở RoI Heads
 
-```text
-dataset_root/
-  images/
-    train/
-    val/
-  annotations/
-    instances_train.json
-    instances_val.json
-```
+Ở RoI Heads, loss phân loại được xây dựng trên cross entropy từng mẫu rồi nhân thêm hệ số focal:
 
-Điều này là điều kiện cần vì toàn bộ dataloader, metric evaluator và phần tự động suy anchor đều dựa trên cách tổ chức này. Một khi annotation đúng COCO, repo có thể kiểm tra số lớp foreground, ánh xạ category id sang label nội bộ và thống kê kích thước đối tượng để tính anchor.
+\[
+FL = (1 - p_t)^\gamma \cdot CE
+\]
 
-Khâu anchor đặc biệt quan trọng đối với SeaDronesSee. Khi `anchor_sizes` để `auto`, code trong [anchors.py](D:/Quanti_FasterRCNN/EchteAI/pipelines/convnext_qat/anchors.py) quét bounding box của tập huấn luyện, quy đổi về không gian kích thước sau resize rồi tạo ra năm anchor scales tương ứng với các mức của FPN. Việc làm này giúp RPN nhìn thấy anchor gần với vật thể thật hơn, từ đó proposal recall tốt hơn. Nếu thay anchor sau khi đã train, nên coi đó là một cấu hình mới và train lại baseline FP32 thay vì resume checkpoint cũ.
+Nếu có hệ số \(\alpha\), foreground và background sẽ được cân bằng bằng các trọng số khác nhau. Điều này giúp RoI Heads tập trung nhiều hơn vào những proposal khó, thay vì bị lấn át bởi các proposal nền quá dễ.
 
-## Môi trường triển khai
+### 7.3. Smooth L1 Loss cho hồi quy bbox
 
-Repo này có thể chạy trên local workstation, Colab hoặc Kaggle. Tuy nhiên về mặt thực dụng, selective eager QAT hiện là nhánh ổn định nhất. Quy ước triển khai của nhánh này là huấn luyện FP32 và QAT trên GPU CUDA, sau đó convert INT8 và benchmark trên CPU. Đây cũng là lý do các script benchmark chính đều xoay quanh so sánh FP32 và INT8 ở môi trường CPU để công bằng hơn.
+Cả RPN và RoI Heads đều dùng Smooth L1 Loss cho nhánh hồi quy bbox. Công thức có dạng:
 
-Nhánh DDP trong [train_qat_ddp.py](D:/Quanti_FasterRCNN/EchteAI/scripts/train_qat_ddp.py) hiểu `training.qat_batch_size` là batch size trên mỗi GPU chứ không phải global batch size. Vì vậy nếu chạy trên hai GPU và đặt `qat_batch_size = 1` thì global batch thật là `2`. Điều này cần được ghi nhớ khi đối chiếu kết quả giữa single-GPU và multi-GPU.
+\[
+\text{SmoothL1}(x)=
+\begin{cases}
+\frac{0.5x^2}{\beta}, & |x| < \beta \\
+|x| - 0.5\beta, & |x| \ge \beta
+\end{cases}
+\]
 
-Repo cũng có một nhánh PT2E graph trong [train_pt2e_qat.py](D:/Quanti_FasterRCNN/EchteAI/scripts/train_pt2e_qat.py) và [pt2e_qat.py](D:/Quanti_FasterRCNN/EchteAI/pipelines/convnext_qat/quantization/pt2e_qat.py). Mục tiêu của nhánh này là giảm overhead eager island bằng graph quantization cho phần backbone hoặc backbone+FPN. Tuy nhiên trong thực tế nó đòi hỏi môi trường phần mềm sạch và ổn định hơn, nên hiện tại eager selective QAT vẫn là baseline dễ vận hành nhất trong các notebook runtime bị giới hạn.
+Trong đó \(x\) là sai số giữa bbox dự đoán và bbox mục tiêu.
 
-## Ví dụ lệnh chạy
+Trong pipeline hiện tại, tham số:
 
-Huấn luyện baseline FP32:
+\[
+\beta = \frac{1}{9}
+\]
 
-```bash
-python scripts/train_fp32.py --config configs/seadronessee_colab.yaml
-```
+Ý nghĩa của Smooth L1 là:
 
-Huấn luyện selective eager QAT trên một GPU:
+- khi sai số nhỏ, loss có dạng gần giống L2, giúp gradient mượt và ổn định
+- khi sai số lớn, loss chuyển sang gần giống L1, giúp ít bị outlier chi phối quá mạnh
 
-```bash
-python scripts/train_qat.py --config configs/seadronessee_colab.yaml --variant M3
-```
+Điều này rất phù hợp với hồi quy bounding box, vì các proposal sai lệch nhiều ở giai đoạn đầu là bình thường. Nếu dùng L2 thuần, gradient có thể bị kéo quá mạnh bởi một số proposal rất xấu.
 
-Huấn luyện selective eager QAT trên hai GPU bằng DDP:
+## 8. FP32 baseline, QAT và triển khai hybrid
 
-```bash
-torchrun --standalone --nnodes=1 --nproc_per_node=2 \
-  scripts/train_qat_ddp.py \
-  --config configs/seadronessee_colab.yaml \
-  --variant M3
-```
+Nhánh hiện tại hỗ trợ ba mức vận hành chính.
 
-Evaluate checkpoint INT8:
+### 8.1. FP32 full PyTorch
 
-```bash
-python scripts/evaluate.py \
-  --config configs/seadronessee_colab.yaml \
-  --model int8 \
-  --checkpoint /path/to/selective_int8.pt \
-  --split val
-```
+Đây là đường chuẩn để huấn luyện và đánh giá chất lượng mô hình. Toàn bộ detector, từ backbone đến RPN và RoI Heads, đều chạy trong PyTorch. Kết quả trên nhánh này được xem là mốc tham chiếu chính.
 
-So sánh FP32 và INT8 trên CPU:
+### 8.2. QAT eager selective
 
-```bash
-python scripts/compare_fp32_int8.py \
-  --config configs/seadronessee_colab.yaml \
-  --fp32-checkpoint /path/to/fp32_best.pt \
-  --int8-checkpoint /path/to/selective_int8.pt \
-  --images 100 \
-  --threads 1
-```
+Sau khi có baseline FP32, mô hình được mở rộng theo hướng Quantization-Aware Training. Ở nhánh eager selective, fake-quant chỉ được chèn vào các vùng được chọn trong mạng, thay vì lượng tử hóa toàn bộ detector. Mục tiêu là giảm sai lệch chất lượng khi chuyển sang mô hình nén.
 
-## Bảng kết quả để tự điền
+### 8.3. Hybrid TensorRT backbone-only
 
-### Baseline FP32
+Đường triển khai hiện tại chưa phải detector INT8 end-to-end hoàn chỉnh. Thay vào đó, chỉ riêng backbone được export và build bằng TensorRT:
 
-| Run ID | Backbone | Ảnh | Epoch | mAP@50:95 | mAP@50 | Ghi chú |
-|---|---|---:|---:|---:|---:|---|
-| FP32-CPU-01 | ConvNeXt-Tiny + FPN | 960 / 1600 | best | 0.5606 | 0.8210 | Acc=0.7351, Prec=0.8027, IoU=0.8146, 6705.2876 ms/img |
+- `FP32 hybrid`: backbone chạy TensorRT FP32, phần còn lại vẫn là PyTorch
+- `INT8 hybrid`: backbone chạy TensorRT INT8, phần còn lại vẫn là PyTorch/QAT
 
-### Checkpoint INT8 sau convert
+Thiết kế này cho phép đánh giá riêng tác động của quantization và compiler lên phần backbone, là phần thường chiếm chi phí tính toán lớn nhất.
 
-| Run ID | Nguồn QAT | Backend | mAP@50:95 | mAP@50 | Latency ms/img | Model MB | Ghi chú |
-|---|---|---|---:|---:|---:|---:|---|
-| INT8-CPU-OLD-E3 | `qat_last` epoch 3 old | eager selective | 0.2141 |  | 6326.2100 | 83.8874 | Acc=0.4459, Prec=0.7788, IoU=0.6961 |
-| INT8-CPU-E3 | `qat_last` epoch 3 | eager selective | 0.3505 | 0.7310 | 6323.6697 | 83.8874 | Acc=0.5432, Prec=0.8375, IoU=0.7539 |
-| INT8-CPU-E4 | `qat_last` epoch 4 | eager selective | 0.3310 | 0.6900 | 6708.8203 | 83.8874 | Acc=0.4718, Prec=0.8073, IoU=0.7589 |
+## 9. Tóm tắt ưu điểm và hạn chế của kiến trúc hiện tại
 
-### Tóm tắt FP32 vs INT8
+### Ưu điểm
 
-| Metric | FP32 | INT8 | Delta |
+Kiến trúc hiện tại có một số lợi thế rõ ràng. Thứ nhất, ResNet50-FPN là một backbone ổn định, dễ huấn luyện và có hệ sinh thái triển khai tốt hơn các kiến trúc thử nghiệm hơn. Thứ hai, việc sử dụng ảnh độ phân giải cao và anchor suy ra từ dữ liệu giúp mô hình phù hợp hơn với bài toán phát hiện vật thể nhỏ trên biển. Thứ ba, Focal Loss giúp giảm tác động của mất cân bằng giữa foreground và background, là vấn đề rất rõ trong bài toán này. Cuối cùng, việc tách riêng đường hybrid TensorRT backbone-only giúp dễ đánh giá lợi ích tăng tốc trước khi tiến tới một đường deploy hoàn chỉnh hơn.
+
+### Hạn chế
+
+Bên cạnh đó, kiến trúc hiện tại vẫn có các hạn chế cần nêu rõ. Việc gộp toàn bộ vật thể thành một lớp foreground giúp đơn giản hóa bài toán nhưng cũng làm mô hình dễ sinh false positive nếu chưa train đủ chín. Đường hybrid hiện tại chưa phải là detector TensorRT end-to-end, nên số liệu tốc độ và chất lượng ở chế độ hybrid không nên so trực tiếp với FP32 full PyTorch mà không nêu rõ bối cảnh. Ngoài ra, do đối tượng rất nhỏ và nền biển nhiều nhiễu, mô hình vẫn nhạy với lựa chọn threshold, quality checkpoint và độ ổn định của nhánh hồi quy bbox.
+
+## 10. Kết quả thực nghiệm
+
+Các kết quả dưới đây được đo trên `100 sample` của tập test. Trong đó, cấu hình `FP32 full` là detector chạy hoàn toàn bằng PyTorch, còn hai cấu hình `INT8 QAT epoch 1` và `INT8 QAT epoch 2` là đường triển khai hybrid với backbone TensorRT INT8. Cột `Speedup` được tính theo tỉ lệ tốc độ so với baseline `FP32 full`, cụ thể:
+
+\[
+\text{Speedup} = \frac{\text{FPS của cấu hình hiện tại}}{\text{FPS của FP32 full}}
+\]
+
+| Metric | FP32 full | INT8 QAT epoch 1 | INT8 QAT epoch 2 |
 |---|---:|---:|---:|
-| mAP@50:95 | 0.5606 | 0.3505 | -0.2101 |
-| mAP@50 | 0.8210 | 0.7310 | -0.0900 |
-| Mean latency ms/img | 6705.2876 | 6323.6697 | -381.6179 |
-| Kích thước backbone MB | 116.5970 | 30.1662 | -86.4308 |
-| Giảm kích thước backbone |  | 74.1278% |  |
-| Kích thước full model MB | 171.9961 | 83.8874 | -88.1087 |
-| Giảm kích thước full model |  | 51.2271% |  |
+| mAP@50:95 | 0.4328 | 0.3693 | 0.3781 |
+| mAP@50 | 0.7149 | 0.6300 | 0.6443 |
+| AP small | 0.1019 | 0.0943 | 0.0854 |
+| AP medium | 0.1745 | 0.1530 | 0.1619 |
+| AP large | 0.3613 | 0.3144 | 0.3172 |
+| Precision | 0.6519 | 0.8182 | 0.6431 |
+| Recall | 0.7130 | 0.5710 | 0.6314 |
+| Accuracy | 0.5164 | 0.5067 | 0.4676 |
+| Mean IoU | 0.8014 | 0.8051 | 0.7961 |
+| F1 | 0.6811 | 0.6726 | 0.6372 |
+| Avg inference (ms/img) | 220.4003 | 183.2253 | 177.5467 |
+| FPS | 4.5372 | 5.4578 | 5.6323 |
+| Speedup vs FP32 full | 1.0000× | 1.2029× | 1.2414× |
 
-## Kết luận
-
-EchteAI hiện tại là một baseline selective eager-QAT thực dụng cho SeaDronesSee. Phần detector FP32 đủ mạnh để làm mốc tham chiếu, phần loss được điều chỉnh theo hướng phù hợp hơn với dữ liệu mất cân bằng và vật thể nhỏ, còn phần quantization cho phép tạo checkpoint INT8 chạy được trên CPU mà không phải viết lại toàn bộ detector theo graph. Đổi lại, đây vẫn là một kiến trúc hai giai đoạn nặng, nên lợi ích latency end-to-end bị giới hạn và chất lượng sau INT8 có thể tụt đáng kể nếu calibration hoặc QAT chưa đủ tốt. Chính vì vậy, baseline này phù hợp nhất như một điểm xuất phát có kiểm soát để so sánh, phân tích và tiếp tục cải thiện.
+Kết quả cho thấy hai cấu hình INT8 đều cải thiện tốc độ suy luận so với baseline FP32 full trên cùng 100 sample. Cụ thể, bản INT8 sau QAT epoch 1 đạt khoảng `1.20×` tốc độ của FP32 full, còn bản INT8 sau QAT epoch 2 đạt khoảng `1.24×`. Đổi lại, các chỉ số mAP tổng thể vẫn thấp hơn baseline FP32 full, nhưng mức suy giảm chưa quá lớn so với lợi ích tăng tốc đạt được. Trong hai cấu hình INT8, bản sau epoch 2 cho kết quả cân bằng hơn giữa chất lượng và tốc độ.
