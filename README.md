@@ -7,6 +7,8 @@ Video so sánh trực quan giữa hai nhánh:
 - trái: `FP32 full PyTorch`
 - phải: `INT8 hybrid` với backbone TensorRT
 
+![Demo FP32 full vs INT8 hybrid](./demo_fp32_full_vs_int8_hybrid.gif)
+
 [Tải video demo](./video_fp32_full_vs_int8_hybrid_ve2.mp4)
 
 ## 1. Giới thiệu
