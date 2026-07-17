@@ -1,5 +1,14 @@
 # SeaDronesSee ResNet50 Faster R-CNN Pipeline
 
+## Demo
+
+Video so sánh trực quan giữa hai nhánh:
+
+- trái: `FP32 full PyTorch`
+- phải: `INT8 hybrid` với backbone TensorRT
+
+[Tải video demo](./video_fp32_full_vs_int8_hybrid_ve2.mp4)
+
 ## 1. Giới thiệu
 
 Nhánh này triển khai bài toán phát hiện vật thể trên ảnh biển với kiến trúc Faster R-CNN sử dụng backbone ResNet50 kết hợp FPN. Mục tiêu của pipeline là xây dựng một baseline FP32 sạch, sau đó mở rộng sang Quantization-Aware Training (QAT) và triển khai tăng tốc theo hướng TensorRT cho riêng phần backbone.
