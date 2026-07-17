@@ -174,6 +174,35 @@ Sau khi có baseline FP32, mô hình được mở rộng theo hướng Quantiza
 
 Thiết kế này cho phép đánh giá riêng tác động của quantization và compiler lên phần backbone, là phần thường chiếm chi phí tính toán lớn nhất.
 
+### 8.4. Thiết kế triển khai TensorRT
+
+Trong nhánh hiện tại, TensorRT chỉ được áp dụng cho phần backbone ResNet50, còn FPN, RPN và RoI Heads vẫn chạy trong PyTorch. Vì vậy đây là một kiến trúc `backbone-only hybrid`, không phải detector TensorRT end-to-end.
+
+Luồng xử lý của nhánh hybrid có thể mô tả như sau:
+
+```mermaid
+flowchart LR
+    A["Ảnh đầu vào"] --> B["Backbone ResNet50"]
+    B --> C["TensorRT engine"]
+    C --> D["Feature maps"]
+    D --> E["FPN + RPN + RoI Heads (PyTorch)"]
+    E --> F["Detections"]
+```
+
+Thiết kế này được chọn vì backbone là phần nặng nhất về tính toán, trong khi các thành phần như proposal generation, RoI Align và postprocess của Faster R-CNN khó ghép thành một graph TensorRT hoàn chỉnh. Bằng cách chỉ tách backbone sang TensorRT, hệ thống có thể đánh giá lợi ích tăng tốc một cách thực dụng và ổn định hơn.
+
+Hiện tại có hai chế độ triển khai:
+
+- `FP32 hybrid`: backbone chạy bằng TensorRT FP32, phần còn lại vẫn là PyTorch.
+- `INT8 hybrid`: backbone chạy bằng TensorRT INT8, phần còn lại vẫn là PyTorch/QAT.
+
+Với `FP32 hybrid`, thường không cần train lại, vì trọng số backbone vẫn giữ ở FP32 và chỉ thay đổi backend thực thi. Ngược lại, với `INT8 hybrid`, mô hình cần đi qua bước QAT trước khi export. Lý do là khi backbone bị lượng tử hóa, phân bố đặc trưng đầu ra thay đổi, làm ảnh hưởng đến FPN, RPN và RoI Heads ở phía sau. Nếu không có bước huấn luyện thích nghi, chất lượng có thể giảm rõ rệt.
+
+Tóm lại:
+
+- `FP32 -> TensorRT FP32`: thường không cần train lại.
+- `FP32 -> TensorRT INT8`: cần QAT trước khi export để mô hình thích nghi với đặc trưng đã lượng tử hóa.
+
 ## 9. Tóm tắt ưu điểm và hạn chế của kiến trúc hiện tại
 
 ### Ưu điểm
