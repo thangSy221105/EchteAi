@@ -248,6 +248,7 @@ Các kết quả dưới đây được đo trên `100 sample` của tập test.
 | F1 | 0.6811 | 0.6726 | 0.6372 |
 | Avg inference (ms/img) | 220.4003 | 183.2253 | 177.5467 |
 | FPS | 4.5372 | 5.4578 | 5.6323 |
+| Memory (MB) | 158 | 93 | 92 |
 | Speedup vs FP32 full | 1.0000× | 1.2029× | 1.2414× |
 
 Kết quả cho thấy hai cấu hình INT8 đều cải thiện tốc độ suy luận so với baseline FP32 full trên cùng 100 sample. Cụ thể, bản INT8 sau QAT epoch 1 đạt khoảng `1.20×` tốc độ của FP32 full, còn bản INT8 sau QAT epoch 2 đạt khoảng `1.24×`. Đổi lại, các chỉ số mAP tổng thể vẫn thấp hơn baseline FP32 full, nhưng mức suy giảm chưa quá lớn so với lợi ích tăng tốc đạt được. Trong hai cấu hình INT8, bản sau epoch 2 cho kết quả cân bằng hơn giữa chất lượng và tốc độ.
