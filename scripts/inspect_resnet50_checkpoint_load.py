@@ -11,9 +11,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from pipelines.convnext_qat.checkpoint import load_partial_checkpoint
-from pipelines.convnext_qat.config import load_config
-from pipelines.convnext_qat.models import build_fasterrcnn_convnext
+from pipelines.fasterrcnn_qat.checkpoint import load_partial_checkpoint
+from pipelines.fasterrcnn_qat.config import load_config
+from pipelines.fasterrcnn_qat.models import build_fasterrcnn_model
 
 
 def parse_args():
@@ -26,7 +26,7 @@ def parse_args():
 def main():
     args = parse_args()
     config = load_config(args.config, require_dataset=False)
-    model = build_fasterrcnn_convnext(config).cpu().eval()
+    model = build_fasterrcnn_model(config).cpu().eval()
     payload = load_partial_checkpoint(args.checkpoint, model, map_location="cpu")
     summary = payload.get("extra", {})
     print(json.dumps(summary, indent=2), flush=True)

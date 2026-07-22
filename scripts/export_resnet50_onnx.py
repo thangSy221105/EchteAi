@@ -23,11 +23,11 @@ import torch
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from pipelines.convnext_qat.checkpoint import load_checkpoint, load_partial_checkpoint
-from pipelines.convnext_qat.compiler import build_compiler_target_module, resolve_compiler_scope
-from pipelines.convnext_qat.config import load_config, quantized_modules_for_variant
-from pipelines.convnext_qat.models import build_fasterrcnn_convnext
-from pipelines.convnext_qat.quantization import (
+from pipelines.fasterrcnn_qat.checkpoint import load_checkpoint, load_partial_checkpoint
+from pipelines.fasterrcnn_qat.compiler import build_compiler_target_module, resolve_compiler_scope
+from pipelines.fasterrcnn_qat.config import load_config, quantized_modules_for_variant
+from pipelines.fasterrcnn_qat.models import build_fasterrcnn_model
+from pipelines.fasterrcnn_qat.quantization import (
     mixed_precision_policy_from_config,
     module_qconfig_map_from_policy,
     policy_scope_to_quantized_modules,
@@ -98,7 +98,7 @@ def load_source_model(
     force_w8a8=False,
     partial_fp32_checkpoint=False,
 ):
-    model = build_fasterrcnn_convnext(config).cpu().eval()
+    model = build_fasterrcnn_model(config).cpu().eval()
     if model_kind == "fp32":
         checkpoint = fp32_checkpoint or config["output"].get("fp32_best")
         if checkpoint and Path(checkpoint).is_file():

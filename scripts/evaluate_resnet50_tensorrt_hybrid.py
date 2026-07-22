@@ -19,12 +19,12 @@ from torchvision.models.detection.image_list import ImageList
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from pipelines.convnext_qat.checkpoint import load_checkpoint
-from pipelines.convnext_qat.config import choose_device, load_config, quantized_modules_for_variant
-from pipelines.convnext_qat.data import build_coco_loader, unwrap_coco_dataset
-from pipelines.convnext_qat.metrics import _coco_metrics, native_detection_metrics, save_metrics
-from pipelines.convnext_qat.models import build_fasterrcnn_convnext
-from pipelines.convnext_qat.quantization import (
+from pipelines.fasterrcnn_qat.checkpoint import load_checkpoint
+from pipelines.fasterrcnn_qat.config import choose_device, load_config, quantized_modules_for_variant
+from pipelines.fasterrcnn_qat.data import build_coco_loader, unwrap_coco_dataset
+from pipelines.fasterrcnn_qat.metrics import _coco_metrics, native_detection_metrics, save_metrics
+from pipelines.fasterrcnn_qat.models import build_fasterrcnn_model
+from pipelines.fasterrcnn_qat.quantization import (
     mixed_precision_policy_from_config,
     module_qconfig_map_from_policy,
     policy_scope_to_quantized_modules,
@@ -143,7 +143,7 @@ class TensorRTBackboneRunner:
 
 
 def load_hybrid_model(config, checkpoint, device):
-    model = build_fasterrcnn_convnext(config)
+    model = build_fasterrcnn_model(config)
     payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
     metadata = payload.get("extra", {}) if isinstance(payload, dict) else {}
     variant = str(metadata.get("variant", config["quantization"].get("variant", "M3"))).upper()

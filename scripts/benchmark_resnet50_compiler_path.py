@@ -15,11 +15,11 @@ import torch
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from pipelines.convnext_qat.checkpoint import load_checkpoint
-from pipelines.convnext_qat.compiler import build_compiler_target_module, resolve_compiler_scope
-from pipelines.convnext_qat.config import load_config, quantized_modules_for_variant
-from pipelines.convnext_qat.models import build_fasterrcnn_convnext
-from pipelines.convnext_qat.quantization import (
+from pipelines.fasterrcnn_qat.checkpoint import load_checkpoint
+from pipelines.fasterrcnn_qat.compiler import build_compiler_target_module, resolve_compiler_scope
+from pipelines.fasterrcnn_qat.config import load_config, quantized_modules_for_variant
+from pipelines.fasterrcnn_qat.models import build_fasterrcnn_model
+from pipelines.fasterrcnn_qat.quantization import (
     convert_selective_qat,
     mixed_precision_policy_from_config,
     module_qconfig_map_from_policy,
@@ -64,7 +64,7 @@ def benchmark(module, sample, warmup_iters, iters):
 
 
 def load_fp32_model(config, checkpoint):
-    model = build_fasterrcnn_convnext(config).cpu().eval()
+    model = build_fasterrcnn_model(config).cpu().eval()
     if checkpoint and Path(checkpoint).is_file():
         print(f"Loading FP32 checkpoint: {checkpoint}", flush=True)
         load_checkpoint(checkpoint, model, map_location="cpu", strict=True)
@@ -77,7 +77,7 @@ def load_int8_model(config, checkpoint, force_w8a8=False):
     if not checkpoint or not Path(checkpoint).is_file():
         return None, None
     print(f"Loading INT8 checkpoint: {checkpoint}", flush=True)
-    model = build_fasterrcnn_convnext(config).cpu().eval()
+    model = build_fasterrcnn_model(config).cpu().eval()
     payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
     metadata = payload.get("extra", {}) if isinstance(payload, dict) else {}
     variant = str(metadata.get("variant", config["quantization"].get("variant", "M3"))).upper()

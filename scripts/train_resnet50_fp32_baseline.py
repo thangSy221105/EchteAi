@@ -22,21 +22,21 @@ import torch
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from pipelines.convnext_qat.checkpoint import (
+from pipelines.fasterrcnn_qat.checkpoint import (
     load_checkpoint,
     load_partial_checkpoint,
     save_checkpoint,
 )
-from pipelines.convnext_qat.config import choose_device, load_config
-from pipelines.convnext_qat.data import build_coco_loader
-from pipelines.convnext_qat.engine import (
+from pipelines.fasterrcnn_qat.config import choose_device, load_config
+from pipelines.fasterrcnn_qat.data import build_coco_loader
+from pipelines.fasterrcnn_qat.engine import (
     append_epoch_benchmark,
     benchmark_inference,
     make_optimizer,
     train_one_epoch,
 )
-from pipelines.convnext_qat.metrics import evaluate_model
-from pipelines.convnext_qat.models import build_fasterrcnn_convnext
+from pipelines.fasterrcnn_qat.metrics import evaluate_model
+from pipelines.fasterrcnn_qat.models import build_fasterrcnn_model
 
 
 def parse_args():
@@ -103,7 +103,7 @@ def main():
     print(f"output.fp32_best={config['output']['fp32_best']}", flush=True)
     print(f"output.fp32_last={config['output']['fp32_last']}", flush=True)
 
-    model = build_fasterrcnn_convnext(config).to(device)
+    model = build_fasterrcnn_model(config).to(device)
     print(f"model parameters={model.logical_parameter_count:,}", flush=True)
 
     optimizer = make_optimizer(model, config, qat=False)

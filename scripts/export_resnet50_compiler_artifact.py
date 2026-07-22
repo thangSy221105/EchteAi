@@ -20,12 +20,12 @@ import torch
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from pipelines.convnext_qat.checkpoint import load_checkpoint
-from pipelines.convnext_qat.compiler import build_compiler_target_module, resolve_compiler_scope
-from pipelines.convnext_qat.compiler import describe_tvm_output_shape
-from pipelines.convnext_qat.config import load_config, quantized_modules_for_variant
-from pipelines.convnext_qat.models import build_fasterrcnn_convnext
-from pipelines.convnext_qat.quantization import (
+from pipelines.fasterrcnn_qat.checkpoint import load_checkpoint
+from pipelines.fasterrcnn_qat.compiler import build_compiler_target_module, resolve_compiler_scope
+from pipelines.fasterrcnn_qat.compiler import describe_tvm_output_shape
+from pipelines.fasterrcnn_qat.config import load_config, quantized_modules_for_variant
+from pipelines.fasterrcnn_qat.models import build_fasterrcnn_model
+from pipelines.fasterrcnn_qat.quantization import (
     convert_selective_qat,
     mixed_precision_policy_from_config,
     module_qconfig_map_from_policy,
@@ -64,7 +64,7 @@ def main():
     batch_size = int(compiler_cfg.get("example_batch_size", 1))
     height = int(compiler_cfg.get("example_height", 256))
     width = int(compiler_cfg.get("example_width", 320))
-    model = build_fasterrcnn_convnext(config).cpu().eval()
+    model = build_fasterrcnn_model(config).cpu().eval()
     payload = {}
 
     if args.model == "fp32":

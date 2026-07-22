@@ -1,3 +1,1 @@
-from .fasterrcnn_convnext import build_fasterrcnn_convnext
-
-__all__ = ["build_fasterrcnn_convnext"]
+from ...fasterrcnn_qat.models import *  # noqa: F401,F403

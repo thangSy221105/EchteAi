@@ -13,10 +13,10 @@ sys.path.insert(0, str(REPO_ROOT))
 
 import torch
 
-from pipelines.convnext_qat.checkpoint import load_checkpoint, save_checkpoint
-from pipelines.convnext_qat.config import load_config, quantized_modules_for_variant
-from pipelines.convnext_qat.models import build_fasterrcnn_convnext
-from pipelines.convnext_qat.quantization import (
+from pipelines.fasterrcnn_qat.checkpoint import load_checkpoint, save_checkpoint
+from pipelines.fasterrcnn_qat.config import load_config, quantized_modules_for_variant
+from pipelines.fasterrcnn_qat.models import build_fasterrcnn_model
+from pipelines.fasterrcnn_qat.quantization import (
     convert_selective_qat,
     mixed_precision_policy_from_config,
     module_qconfig_map_from_policy,
@@ -59,7 +59,7 @@ def main():
         quantized_modules = policy_scope_to_quantized_modules(mixed_precision_policy)
         module_qconfig_map = module_qconfig_map_from_policy(mixed_precision_policy)
 
-    model = build_fasterrcnn_convnext(config).cpu().eval()
+    model = build_fasterrcnn_model(config).cpu().eval()
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message="must run observer before calling calculate_qparams")
         prepared_model = prepare_selective_qat(

@@ -9,11 +9,11 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from pipelines.convnext_qat.checkpoint import load_checkpoint
-from pipelines.convnext_qat.config import choose_device, load_config
-from pipelines.convnext_qat.data import build_coco_loader
-from pipelines.convnext_qat.models import build_fasterrcnn_convnext
-from pipelines.convnext_qat.quantization import (
+from pipelines.fasterrcnn_qat.checkpoint import load_checkpoint
+from pipelines.fasterrcnn_qat.config import choose_device, load_config
+from pipelines.fasterrcnn_qat.data import build_coco_loader
+from pipelines.fasterrcnn_qat.models import build_fasterrcnn_model
+from pipelines.fasterrcnn_qat.quantization import (
     build_resnet50_mixed_precision_policy,
     estimate_resnet50_sensitivity,
     save_hawq_policy,
@@ -79,7 +79,7 @@ def main():
         limit=args.limit,
         batch_size=int(args.batch_size),
     )
-    model = build_fasterrcnn_convnext(config)
+    model = build_fasterrcnn_model(config)
     if args.fp32_checkpoint:
         print(f"Loading FP32 checkpoint: {args.fp32_checkpoint}", flush=True)
         load_checkpoint(args.fp32_checkpoint, model)
