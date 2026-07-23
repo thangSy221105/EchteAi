@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate a TensorRT backbone-FPN engine + PyTorch RPN/ROI heads hybrid.
-
-Expected engine interface:
-- input0: normalized image tensor of fixed static shape
-- outputs: keys 0, 1, 2, 3, pool
-
-Those outputs must match the tensor interface of ``model.backbone(...)`` for
-the ResNet50 + FPN detector.
-"""
+"""Evaluate a TensorRT backbone-FPN engine + PyTorch RPN/ROI heads hybrid."""
 
 from __future__ import annotations
 
@@ -21,8 +13,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn.functional as F
-from torchvision.models.detection.image_list import ImageList
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -55,8 +45,6 @@ def parse_args():
     parser.add_argument("--split", choices=["val", "test"], default="test")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--output")
-    parser.add_argument("--height", type=int)
-    parser.add_argument("--width", type=int)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--progress-frequency", type=int, default=10)
     return parser.parse_args()
@@ -113,6 +101,7 @@ class TensorRTBackboneFPNRunner:
         self.input_name, self.output_names = self._discover_tensors()
         self.current_shape = None
         self.output_tensors = {}
+        self.shapes_seen = set()
 
     def _discover_tensors(self):
         tensor_names = [self.engine.get_tensor_name(i) for i in range(self.engine.num_io_tensors)]
@@ -150,6 +139,7 @@ class TensorRTBackboneFPNRunner:
             raise ValueError("TensorRT backbone expects a CUDA tensor input")
         shape = tuple(int(v) for v in batch_tensor.shape)
         self._allocate(shape)
+        self.shapes_seen.add(shape)
         self.context.set_tensor_address(self.input_name, int(batch_tensor.data_ptr()))
         for name, tensor in self.output_tensors.items():
             self.context.set_tensor_address(name, int(tensor.data_ptr()))
@@ -204,47 +194,27 @@ def load_hybrid_model(config, args, device):
     return model.to(device).eval()
 
 
-def preprocess_batch(model, images, targets, fixed_height, fixed_width, device):
-    image_mean = torch.tensor(model.transform.image_mean, device=device).view(-1, 1, 1)
-    image_std = torch.tensor(model.transform.image_std, device=device).view(-1, 1, 1)
-    batched = []
-    original_sizes = []
-    fixed_sizes = []
-
-    for image, _target in zip(images, targets):
-        image = image.to(device)
-        original_h, original_w = image.shape[-2:]
-        original_sizes.append((original_h, original_w))
-        normalized = (image - image_mean) / image_std
-        resized = F.interpolate(
-            normalized.unsqueeze(0),
-            size=(fixed_height, fixed_width),
-            mode="bilinear",
-            align_corners=False,
-        ).squeeze(0)
-        batched.append(resized)
-        fixed_sizes.append((fixed_height, fixed_width))
-
-    image_list = ImageList(torch.stack(batched, dim=0), fixed_sizes)
+def preprocess_batch(model, images, device):
+    images = [image.to(device) for image in images]
+    original_sizes = [tuple(int(v) for v in image.shape[-2:]) for image in images]
+    image_list, _ = model.transform(images, None)
     return image_list, original_sizes
 
 
 @torch.inference_mode()
-def evaluate_hybrid_model(model, backbone_runner, loader, device, fixed_height, fixed_width, progress_frequency=10):
+def evaluate_hybrid_model(model, backbone_runner, loader, device, progress_frequency=10):
     model.eval()
     predictions, targets = [], []
     total_images = len(loader.dataset)
     processed = 0
     timings = []
     print(
-        f"hybrid backbone-fpn evaluation started: target={total_images} images device={device} fixed_shape={fixed_height}x{fixed_width}",
+        f"hybrid backbone-fpn evaluation started: target={total_images} images device={device} transform=model.transform(...)",
         flush=True,
     )
 
     for images, batch_targets in loader:
-        image_list, original_sizes = preprocess_batch(
-            model, images, batch_targets, fixed_height, fixed_width, device
-        )
+        image_list, original_sizes = preprocess_batch(model, images, device)
 
         t0 = time.perf_counter()
         features = backbone_runner(image_list.tensors)
@@ -279,7 +249,9 @@ def evaluate_hybrid_model(model, backbone_runner, loader, device, fixed_height, 
         metrics.update(canonical)
     metrics["avg_inference_ms_per_image"] = sum(timings) / max(len(timings), 1)
     metrics["fps"] = 1000.0 / metrics["avg_inference_ms_per_image"] if metrics["avg_inference_ms_per_image"] > 0 else float("nan")
-    metrics["engine_shape"] = [int(fixed_height), int(fixed_width)]
+    metrics["engine_input_shapes_seen"] = [
+        list(shape) for shape in sorted(backbone_runner.shapes_seen)
+    ]
     print("hybrid backbone-fpn evaluation completed", flush=True)
     return metrics
 
@@ -289,9 +261,6 @@ def main():
     if int(args.batch_size) != 1:
         raise ValueError("Hybrid TensorRT benchmark currently supports batch_size=1 only")
     config = load_config(args.config, require_dataset=True)
-    compiler_cfg = config.get("quantization", {}).get("compiler", {})
-    fixed_height = int(args.height or compiler_cfg.get("example_height", 1080))
-    fixed_width = int(args.width or compiler_cfg.get("example_width", 1920))
     device = choose_device(config.get("device", "auto"))
     if device.type != "cuda":
         raise RuntimeError("Hybrid TensorRT benchmark requires CUDA")
@@ -306,8 +275,6 @@ def main():
         backbone_runner,
         loader,
         device,
-        fixed_height,
-        fixed_width,
         progress_frequency=int(args.progress_frequency),
     )
 

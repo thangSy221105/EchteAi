@@ -16,6 +16,9 @@ def parse_args():
     parser.add_argument("--precision", choices=["fp32", "int8"], required=True)
     parser.add_argument("--workspace-mb", type=int, default=4096)
     parser.add_argument("--calib-cache")
+    parser.add_argument("--min-shape", help="Dynamic profile min shape, e.g. 1x3x800x800")
+    parser.add_argument("--opt-shape", help="Dynamic profile opt shape, e.g. 1x3x1088x800")
+    parser.add_argument("--max-shape", help="Dynamic profile max shape, e.g. 1x3x1333x1333")
     return parser.parse_args()
 
 
@@ -58,6 +61,20 @@ def _shape_from_text(text):
     return tuple(int(value) for value in str(text).split("x"))
 
 
+def _resolve_profile_shapes(args, example_shape):
+    min_shape = _shape_from_text(args.min_shape) if args.min_shape else tuple(example_shape)
+    opt_shape = _shape_from_text(args.opt_shape) if args.opt_shape else tuple(example_shape)
+    max_shape = _shape_from_text(args.max_shape) if args.max_shape else tuple(example_shape)
+    if not (len(min_shape) == len(opt_shape) == len(max_shape) == len(example_shape)):
+        raise ValueError("min/opt/max shapes must have the same rank as example_shape")
+    for axis, (mn, op, mx) in enumerate(zip(min_shape, opt_shape, max_shape)):
+        if not (mn <= op <= mx):
+            raise ValueError(
+                f"Invalid TensorRT profile axis {axis}: expected min <= opt <= max, got {mn}, {op}, {mx}"
+            )
+    return min_shape, opt_shape, max_shape
+
+
 def _write_int8_calibration_cache(path, metadata):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -97,6 +114,7 @@ def main():
     metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.is_file() else {}
     example_shape = tuple(int(v) for v in metadata.get("example_shape", [1, 3, 256, 320]))
     input_name = metadata.get("input_name", "input0")
+    min_shape, opt_shape, max_shape = _resolve_profile_shapes(args, example_shape)
 
     engine_path = Path(args.engine) if args.engine else onnx_path.with_suffix(f".{args.precision}.engine")
     engine_path.parent.mkdir(parents=True, exist_ok=True)
@@ -119,7 +137,7 @@ def main():
     _set_workspace(trt, config, args.workspace_mb)
 
     profile = builder.create_optimization_profile()
-    profile.set_shape(input_name, example_shape, example_shape, example_shape)
+    profile.set_shape(input_name, min_shape, opt_shape, max_shape)
     config.add_optimization_profile(profile)
 
     if args.precision == "int8":
@@ -143,6 +161,9 @@ def main():
         "precision": args.precision,
         "input_name": input_name,
         "example_shape": list(example_shape),
+        "profile_min_shape": list(min_shape),
+        "profile_opt_shape": list(opt_shape),
+        "profile_max_shape": list(max_shape),
         "tensorrt_version": trt.__version__,
     }
     summary_path = engine_path.with_suffix(engine_path.suffix + ".json")
