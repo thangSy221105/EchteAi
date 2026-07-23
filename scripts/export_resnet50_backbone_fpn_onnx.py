@@ -41,7 +41,7 @@ from pipelines.fasterrcnn_qat.quantization import (
 )
 
 
-FEATURE_NAMES = ["0", "1", "2", "3", "pool"]
+FEATURE_NAMES = ["p2", "p3", "p4", "p5", "p6_pool"]
 
 
 def parse_args():

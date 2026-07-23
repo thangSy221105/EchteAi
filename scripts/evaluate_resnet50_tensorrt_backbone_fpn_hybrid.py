@@ -40,7 +40,8 @@ from pipelines.fasterrcnn_qat.quantization import (
 )
 
 
-FEATURE_NAMES = ("0", "1", "2", "3", "pool")
+ENGINE_OUTPUT_NAMES = ("p2", "p3", "p4", "p5", "p6_pool")
+MODEL_FEATURE_NAMES = ("0", "1", "2", "3", "pool")
 
 
 def parse_args():
@@ -121,9 +122,9 @@ class TensorRTBackboneFPNRunner:
         output_names = [name for name in tensor_names if self.engine.get_tensor_mode(name) == output_mode]
         if len(input_names) != 1:
             raise RuntimeError(f"Expected exactly one TensorRT input, found {input_names}")
-        if tuple(output_names) != FEATURE_NAMES:
+        if tuple(output_names) != ENGINE_OUTPUT_NAMES:
             raise RuntimeError(
-                f"Expected TensorRT outputs {FEATURE_NAMES}, got {tuple(output_names)}"
+                f"Expected TensorRT outputs {ENGINE_OUTPUT_NAMES}, got {tuple(output_names)}"
             )
         return input_names[0], output_names
 
@@ -157,7 +158,10 @@ class TensorRTBackboneFPNRunner:
         if not ok:
             raise RuntimeError("TensorRT hybrid backbone execution failed.")
         self.stream.synchronize()
-        return OrderedDict((name, self.output_tensors[name]) for name in self.output_names)
+        return OrderedDict(
+            (model_name, self.output_tensors[engine_name])
+            for model_name, engine_name in zip(MODEL_FEATURE_NAMES, self.output_names)
+        )
 
 
 def load_hybrid_model(config, args, device):
