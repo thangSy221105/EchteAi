@@ -55,6 +55,7 @@ def parse_args():
     parser.add_argument("--opset", type=int, default=18)
     parser.add_argument("--force-w8a8", action="store_true")
     parser.add_argument("--tensorrt-friendly-int8", action="store_true")
+    parser.add_argument("--dynamic-hw", action="store_true", help="Export ONNX with dynamic height/width axes")
     return parser.parse_args()
 
 
@@ -196,6 +197,15 @@ def main():
         opset_version=int(args.opset),
         do_constant_folding=True,
     )
+    if args.dynamic_hw:
+        export_kwargs["dynamic_axes"] = {
+            "input0": {2: "height", 3: "width"},
+            "p2": {2: "p2_height", 3: "p2_width"},
+            "p3": {2: "p3_height", 3: "p3_width"},
+            "p4": {2: "p4_height", 3: "p4_width"},
+            "p5": {2: "p5_height", 3: "p5_width"},
+            "p6_pool": {2: "p6_height", 3: "p6_width"},
+        }
     if args.model == "qat_graph":
         torch.onnx.export(
             target_module,
@@ -233,6 +243,7 @@ def main():
         "checkpoint_extra": payload.get("extra", {}) if isinstance(payload, dict) else {},
         "force_w8a8": bool(args.force_w8a8),
         "tensorrt_friendly_int8": bool(args.tensorrt_friendly_int8),
+        "dynamic_hw": bool(args.dynamic_hw),
         "normalized_zero_points": int(normalized_zero_points),
         "opset": int(args.opset),
     }
